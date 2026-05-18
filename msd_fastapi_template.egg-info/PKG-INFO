@@ -3,10 +3,10 @@ Name: msd-fastapi-template
 Version: 0.1.0
 Summary: FastAPI starter template for Modern Software Development course
 Requires-Python: >=3.12
-Requires-Dist: fastapi<0.137.0,>=0.136.1
+Requires-Dist: fastapi<1.0.0,>=0.136.1
 Requires-Dist: psycopg2-binary<3.0.0,>=2.9.0
 Requires-Dist: pydantic<3.0.0,>=2.13.4
 Requires-Dist: pydantic-settings<3.0.0,>=2.14.1
 Requires-Dist: sqlalchemy<3.0.0,>=2.0.0
 Requires-Dist: structlog<26.0.0,>=24.0.0
-Requires-Dist: uvicorn[standard]<0.48.0,>=0.47.0
+Requires-Dist: uvicorn[standard]<1.0.0,>=0.47.0
