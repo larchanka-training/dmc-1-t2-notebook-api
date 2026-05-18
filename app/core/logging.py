@@ -13,7 +13,7 @@ def _build_shared_processors() -> list[Any]:
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
+        structlog.processors.ExceptionRenderer(),
         structlog.processors.EventRenamer("message"),
     ]
 
