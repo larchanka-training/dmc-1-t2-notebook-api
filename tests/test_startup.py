@@ -67,7 +67,7 @@ def test_readiness_degraded_when_db_fails(client: TestClient) -> None:
     app.dependency_overrides[get_db] = _override_db_fail
     try:
         response = client.get(f"{settings.api_prefix}/health/ready")
-        assert response.status_code == 200
+        assert response.status_code == 503
         payload = response.json()
         assert payload["status"] == "degraded"
         assert any(c["name"] == "database" and c["status"] == "fail" for c in payload["components"])

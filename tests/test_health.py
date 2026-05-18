@@ -1,12 +1,19 @@
+from collections.abc import Generator
+
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
 from app.main import app
 
-client = TestClient(app)
+
+@pytest.fixture
+def client() -> Generator[TestClient, None, None]:
+    with TestClient(app) as c:
+        yield c
 
 
-def test_liveness_returns_ok() -> None:
+def test_liveness_returns_ok(client: TestClient) -> None:
     response = client.get(f"{settings.api_prefix}/health")
     assert response.status_code == 200
     payload = response.json()

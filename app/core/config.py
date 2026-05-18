@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
-    database_url: str = "postgresql://admin:admin123@postgres:5432/wiki"
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/notebook_dev"
     database_echo: bool = False
     log_level: str = "INFO"
     log_json: bool = True
