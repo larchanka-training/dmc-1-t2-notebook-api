@@ -19,8 +19,6 @@ def _build_shared_processors() -> list[Any]:
 
 
 def configure_logging() -> None:
-    """Configure structlog + stdlib logging to produce structured JSON logs."""
-
     shared_processors = _build_shared_processors()
 
     renderer: Any = (

@@ -1,16 +1,3 @@
-"""Integration test verifying that the FastAPI app boots cleanly.
-
-Checks that:
-  - `app.main` imports without side-effect errors
-  - logging is configured and routes are registered
-  - liveness and readiness endpoints respond
-  - readiness reports a degraded state when DB is unreachable
-  - OpenAPI schema is generated
-
-Uses TestClient as a context manager so FastAPI lifespan
-(startup/shutdown) events actually fire.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Generator

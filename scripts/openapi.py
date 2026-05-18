@@ -29,7 +29,9 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+ChangeKind = Literal["none", "patch", "minor", "major"]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SNAPSHOT_PATH = REPO_ROOT / "docs" / "openapi.json"
@@ -37,7 +39,6 @@ PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 
 
 def _load_app_schema() -> dict[str, Any]:
-    """Import the FastAPI app and return its OpenAPI schema."""
     sys.path.insert(0, str(REPO_ROOT))
     from app.main import app  # noqa: WPS433 — late import is intentional
 
@@ -87,8 +88,7 @@ def _bump(version: str, kind: str) -> str:
     return f"{major}.{minor}.{patch + 1}"
 
 
-def _classify_change(old: dict[str, Any], new: dict[str, Any]) -> str:
-    """Return 'none' | 'patch' | 'minor' | 'major'."""
+def _classify_change(old: dict[str, Any], new: dict[str, Any]) -> ChangeKind:
     if old == new:
         return "none"
 
