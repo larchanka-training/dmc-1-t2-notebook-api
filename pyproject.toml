@@ -19,3 +19,7 @@ dependencies = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["liquibase*", "docs*", "tests*", "scripts*"]
