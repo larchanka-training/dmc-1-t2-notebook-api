@@ -187,51 +187,50 @@
     },
     "/api/v1/health/ready": {
       "get": {
-        "description": "Verifies that the application and its critical dependencies (database) are reachable. Use this endpoint for Kubernetes `readinessProbe`. Returns HTTP 200 with `status=degraded` when a component is unhealthy so traffic can be drained.",
+        "description": "Verifies that the application and its critical dependencies (database) are reachable. Use this endpoint for Kubernetes `readinessProbe`. Returns HTTP 200 when all critical dependencies are healthy and HTTP 503 when a dependency is unavailable.",
         "operationId": "readiness_api_v1_health_ready_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "examples": {
-                  "degraded": {
-                    "summary": "Database unreachable",
-                    "value": {
-                      "app": "MSD FastAPI Template",
-                      "components": [
-                        {
-                          "detail": "connection refused",
-                          "name": "database",
-                          "status": "fail"
-                        }
-                      ],
-                      "environment": "dev",
-                      "status": "degraded",
-                      "version": "0.1.0"
+                "example": {
+                  "app": "MSD FastAPI Template",
+                  "components": [
+                    {
+                      "name": "database",
+                      "status": "ok"
                     }
-                  },
-                  "ok": {
-                    "summary": "All components healthy",
-                    "value": {
-                      "app": "MSD FastAPI Template",
-                      "components": [
-                        {
-                          "name": "database",
-                          "status": "ok"
-                        }
-                      ],
-                      "environment": "dev",
-                      "status": "ok",
-                      "version": "0.1.0"
-                    }
-                  }
+                  ],
+                  "environment": "dev",
+                  "status": "ok",
+                  "version": "0.1.0"
                 },
                 "schema": {
                   "$ref": "#/components/schemas/HealthResponse"
                 }
               }
             },
-            "description": "Readiness status, including per-component checks"
+            "description": "All components healthy"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "app": "MSD FastAPI Template",
+                  "components": [
+                    {
+                      "detail": "connection refused",
+                      "name": "database",
+                      "status": "fail"
+                    }
+                  ],
+                  "environment": "dev",
+                  "status": "degraded",
+                  "version": "0.1.0"
+                }
+              }
+            },
+            "description": "One or more critical dependencies are unreachable"
           }
         },
         "summary": "Readiness probe",
