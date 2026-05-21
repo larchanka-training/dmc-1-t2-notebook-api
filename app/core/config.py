@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     token_ttl_seconds: int = 86400
     session_ttl_seconds: int = 604800
 
+    jwt_secret_key: str = "dev-only-insecure-secret-change-me-in-production"
+    jwt_algorithm: str = "HS256"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
