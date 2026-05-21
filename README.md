@@ -9,6 +9,7 @@ around a **multi-module architecture**: every domain module owns its
 - FastAPI app with versioned API routing (`/api/v1`)
 - Multi-module layout (`app/modules/<module>/{controllers,services,schemas}/`)
 - Health module with **liveness** (`/health`) and **readiness** (`/health/ready`) probes
+- Auth module — registration, login, refresh/logout, current-user, with JWT + bcrypt
 - Database layer scaffolding (SQLAlchemy 2, lazy engine, Liquibase changelogs)
 - Structured logging via `structlog` (JSON-ready)
 - Rich Swagger / OpenAPI documentation (`/docs`, `/redoc`, `/openapi.json`)
@@ -25,10 +26,16 @@ around a **multi-module architecture**: every domain module owns its
 │   │   ├── db.py              # SQLAlchemy engine + get_db dependency
 │   │   └── logging.py         # structlog configuration
 │   ├── modules
-│   │   └── health
-│   │       ├── controllers/   # HTTP endpoints
-│   │       ├── services/      # business logic
-│   │       └── schemas/       # request / response contracts
+│   │   ├── health
+│   │   │   ├── controllers/   # HTTP endpoints
+│   │   │   ├── services/      # business logic
+│   │   │   └── schemas/       # request / response contracts
+│   │   └── auth               # registration, login, JWT, sessions
+│   │       ├── controllers/
+│   │       ├── services/      # auth_service + security (bcrypt, JWT)
+│   │       ├── schemas/
+│   │       ├── dependencies.py # get_current_user
+│   │       └── models.py      # User, Session ORM models
 │   └── main.py                # FastAPI app, Swagger metadata
 ├── docs
 │   └── openapi.json           # committed OpenAPI snapshot
@@ -39,6 +46,7 @@ around a **multi-module architecture**: every domain module owns its
 │   └── openapi.py             # dump / bump tooling
 ├── tests
 │   ├── test_health.py         # liveness contract test
+│   ├── test_auth.py           # auth endpoints (SQLite-backed)
 │   └── test_startup.py        # integration: boot, routes, OpenAPI, readiness
 ├── .env.example
 ├── Dockerfile
@@ -97,6 +105,23 @@ Response envelope (`HealthResponse`):
   "components": []
 }
 ```
+
+## Auth endpoints
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/v1/auth/register` | Register with email + password (min 8 chars); email must be unique. |
+| `POST /api/v1/auth/login` | Authenticate; returns a JWT access token and a refresh token. |
+| `POST /api/v1/auth/refresh` | Rotate the refresh token; the old one is revoked. |
+| `POST /api/v1/auth/logout` | Revoke a refresh token. |
+| `GET /api/v1/auth/me` | Current user; requires `Authorization: Bearer <access_token>`. |
+
+- Access tokens are stateless JWT (`HS256`); refresh tokens are opaque,
+  stored hashed (SHA-256) in `app.sessions`.
+- Configure `JWT_SECRET_KEY` (and optionally `JWT_ALGORITHM`,
+  `TOKEN_TTL_SECONDS`, `SESSION_TTL_SECONDS`) via environment.
+- The execution model these endpoints guard is described in the monorepo
+  doc `docs/execution-architecture.md`.
 
 ## Run tests
 

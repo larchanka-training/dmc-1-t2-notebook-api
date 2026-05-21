@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from app.core.config import settings
 from app.core.logging import configure_logging
+from app.modules.auth import router as auth_router
 from app.modules.health import router as health_router
 
 configure_logging()
@@ -17,6 +18,13 @@ tags_metadata = [
         "description": (
             "Liveness and readiness probes used by orchestrators "
             "(Kubernetes, Docker Compose) to monitor the service."
+        ),
+    },
+    {
+        "name": "Auth",
+        "description": (
+            "User registration and authentication. Issues JWT access tokens "
+            "and rotatable refresh tokens."
         ),
     },
 ]
@@ -47,6 +55,7 @@ app = FastAPI(
 )
 
 app.include_router(health_router, prefix=settings.api_prefix)
+app.include_router(auth_router, prefix=settings.api_prefix)
 
 
 @app.get(
