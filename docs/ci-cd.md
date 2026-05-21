@@ -29,7 +29,7 @@ cp .env.example .env
 | `API_PREFIX` | Префикс API-роутов | `/api/v1` |
 | `APP_HOST` | Host для локального запуска | `0.0.0.0` |
 | `APP_PORT` | Port для локального запуска | `8000` |
-| `DATABASE_URL` | Строка подключения к PostgreSQL | `postgresql://admin:admin123@postgres:5432/wiki` |
+| `DATABASE_URL` | Строка подключения к PostgreSQL | `postgresql://postgres:postgres@localhost:5432/notebook_dev` |
 | `OAUTH_NAME_APPLICATION_ID` | ID OAuth-приложения | хранить в GitHub Secrets |
 | `OAUTH_NAME_SECRET_KEY` | Secret OAuth-приложения | хранить в GitHub Secrets |
 | `TOKEN_TTL_SECONDS` | Время жизни access token | `86400` |
