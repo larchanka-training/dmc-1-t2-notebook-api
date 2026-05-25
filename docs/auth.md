@@ -213,7 +213,13 @@ POST /api/v1/auth/logout  → revoke session
 Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error envelope:
 
 ```json
-{ "code": "machine_readable_code", "message": "Human readable" }
+{
+  "error": {
+    "code": "machine_readable_code",
+    "message": "Human readable",
+    "fields": {}
+  }
+}
 ```
 
 ### 5.1. `POST /api/v1/auth/otp/request`
@@ -342,11 +348,13 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 
 ### 5.5. `GET /api/v1/auth/me`
 
-**Headers:** `Authorization: Bearer <access>`.
+**Headers:** в placeholder-режиме можно не передавать заголовки. Для dev/test
+можно передать `X-User-Id: <uuid>`. В real-auth режиме будет
+`Authorization: Bearer <access>`.
 
 **Response 200:**
 ```json
-{ "id": "uuid", "email": "user@example.com", "displayName": null }
+{ "id": "uuid", "email": "user@example.com", "displayName": null, "roles": [] }
 ```
 
 **Errors:**
@@ -384,13 +392,13 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
     "id": "cell-1",
     "kind": "code",
     "content": "console.log('hi')",
-    "updatedAt": "2026-05-21T10:00:00Z"
+    "updatedAt": 1779367200000
   },
   {
     "id": "cell-2",
     "kind": "markdown",
     "content": "## Hello",
-    "updatedAt": "2026-05-21T10:01:00Z"
+    "updatedAt": 1779367260000
   }
 ]
 ```
@@ -399,7 +407,7 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 - `id` — стабильный client-generated id (UUID v4 или short id). Не меняется при перемещении. Необходим для LWW.
 - `kind` — `'code'` или `'markdown'` (выровняли с `ui/src/features/notebook/domain/cell.ts`).
 - `content` — исходный текст. Для `code` — JavaScript. Для `markdown` — GFM.
-- `updatedAt` — ISO timestamp последнего изменения ячейки. Используется для LWW (§8).
+- `updatedAt` — Unix timestamp в миллисекундах (`number`) последнего изменения ячейки. Используется для LWW (§8).
 
 **Порядок ячеек** — порядок в массиве. Дополнительных полей для «order» не храним — это упрощает модель. При перемещении ячейки изменяется notebook-уровень `updated_at`, но не `cell.updatedAt`.
 
@@ -434,10 +442,10 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
   "title": "My Notebook",
   "formatVersion": 1,
   "cells": [
-    { "id": "cell-1", "kind": "code", "content": "...", "updatedAt": "2026-05-21T10:00:00Z" }
+    { "id": "cell-1", "kind": "code", "content": "...", "updatedAt": 1779367200000 }
   ],
   "deletedCells": [
-    { "id": "cell-99", "deletedAt": "2026-05-21T10:05:00Z" }
+    { "id": "cell-99", "deletedAt": 1779367500000 }
   ]
 }
 ```
@@ -632,4 +640,3 @@ while notebook.format_version < CURRENT_FORMAT_VERSION:
 - **Audit log**: отдельная таблица `auth_events` (login, logout, refresh_revoked, otp_failed)? Не в v1.
 
 [ui-auth]: https://github.com/larchanka-training/dmc-1-t2-notebook-ui/blob/main/docs/auth.md
-

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <changeSet id="0002-users-notebooks" author="msd">
+        <comment>
+            Adds the minimum users/notebooks schema for placeholder auth and
+            offline-first notebook sync. Cells are stored as notebooks.cells
+            JSONB for MVP; there is no separate cells table.
+        </comment>
+
+        <sql>
+            CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+            CREATE TABLE IF NOT EXISTS app.users (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                email text UNIQUE NOT NULL,
+                display_name text,
+                created_at timestamptz NOT NULL DEFAULT now()
+            );
+
+            INSERT INTO app.users (id, email, display_name)
+            VALUES (
+                '00000000-0000-0000-0000-000000000001',
+                'dev@notebook.local',
+                'Dev User'
+            )
+            ON CONFLICT (id) DO NOTHING;
+
+            CREATE TABLE IF NOT EXISTS app.notebooks (
+                id uuid PRIMARY KEY,
+                owner_id uuid NOT NULL REFERENCES app.users(id) ON DELETE CASCADE,
+                title text NOT NULL,
+                format_version int NOT NULL DEFAULT 1,
+                cells jsonb NOT NULL DEFAULT '[]'::jsonb,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                deleted_at timestamptz
+            );
+
+            CREATE INDEX IF NOT EXISTS notebooks_owner_updated_idx
+                ON app.notebooks(owner_id, updated_at DESC)
+                WHERE deleted_at IS NULL;
+
+            CREATE INDEX IF NOT EXISTS notebooks_owner_active_idx
+                ON app.notebooks(owner_id)
+                WHERE deleted_at IS NULL;
+        </sql>
+
+        <rollback>
+            <sql>
+                DROP TABLE IF EXISTS app.notebooks;
+                DROP TABLE IF EXISTS app.users;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

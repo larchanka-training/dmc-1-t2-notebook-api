@@ -11,5 +11,6 @@
     -->
 
     <include file="changes/0001-initial.xml" relativeToChangelogFile="true"/>
+    <include file="changes/0002-users-notebooks.xml" relativeToChangelogFile="true"/>
 
 </databaseChangeLog>

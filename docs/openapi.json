@@ -1,6 +1,60 @@
 {
   "components": {
     "schemas": {
+      "CellSchema": {
+        "properties": {
+          "content": {
+            "default": "",
+            "title": "Content",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "code",
+              "markdown"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "updatedAt": {
+            "minimum": 0.0,
+            "title": "Updatedat",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "updatedAt"
+        ],
+        "title": "CellSchema",
+        "type": "object"
+      },
+      "CellTombstone": {
+        "properties": {
+          "deletedAt": {
+            "minimum": 0.0,
+            "title": "Deletedat",
+            "type": "integer"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "deletedAt"
+        ],
+        "title": "CellTombstone",
+        "type": "object"
+      },
       "ComponentStatus": {
         "examples": [
           {
@@ -49,6 +103,62 @@
           "status"
         ],
         "title": "ComponentStatus",
+        "type": "object"
+      },
+      "CurrentUser": {
+        "properties": {
+          "displayName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Displayname"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Roles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "CurrentUser",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
         "type": "object"
       },
       "HealthResponse": {
@@ -113,6 +223,241 @@
         ],
         "title": "HealthResponse",
         "type": "object"
+      },
+      "NotebookCreate": {
+        "properties": {
+          "cells": {
+            "items": {
+              "$ref": "#/components/schemas/CellSchema"
+            },
+            "title": "Cells",
+            "type": "array"
+          },
+          "formatVersion": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Formatversion",
+            "type": "integer"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "NotebookCreate",
+        "type": "object"
+      },
+      "NotebookListItem": {
+        "properties": {
+          "cellsCount": {
+            "title": "Cellscount",
+            "type": "integer"
+          },
+          "createdAt": {
+            "title": "Createdat",
+            "type": "integer"
+          },
+          "formatVersion": {
+            "title": "Formatversion",
+            "type": "integer"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updatedAt": {
+            "title": "Updatedat",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "formatVersion",
+          "createdAt",
+          "updatedAt",
+          "cellsCount"
+        ],
+        "title": "NotebookListItem",
+        "type": "object"
+      },
+      "NotebookListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/NotebookListItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "NotebookListResponse",
+        "type": "object"
+      },
+      "NotebookPatch": {
+        "properties": {
+          "cells": {
+            "items": {
+              "$ref": "#/components/schemas/CellSchema"
+            },
+            "title": "Cells",
+            "type": "array"
+          },
+          "deletedCells": {
+            "items": {
+              "$ref": "#/components/schemas/CellTombstone"
+            },
+            "title": "Deletedcells",
+            "type": "array"
+          },
+          "formatVersion": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Formatversion",
+            "type": "integer"
+          },
+          "title": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "NotebookPatch",
+        "type": "object"
+      },
+      "NotebookResponse": {
+        "properties": {
+          "cells": {
+            "items": {
+              "$ref": "#/components/schemas/CellSchema"
+            },
+            "title": "Cells",
+            "type": "array"
+          },
+          "createdAt": {
+            "title": "Createdat",
+            "type": "integer"
+          },
+          "formatVersion": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Formatversion",
+            "type": "integer"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "ownerId": {
+            "format": "uuid",
+            "title": "Ownerid",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "updatedAt": {
+            "title": "Updatedat",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "title",
+          "id",
+          "ownerId",
+          "createdAt",
+          "updatedAt"
+        ],
+        "title": "NotebookResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
       }
     }
   },
@@ -125,7 +470,7 @@
     "license": {
       "name": "MIT"
     },
-    "title": "MSD FastAPI Template",
+    "title": "JS Notebook API",
     "version": "0.1.0"
   },
   "openapi": "3.1.0",
@@ -153,6 +498,56 @@
         "summary": "Service welcome message",
         "tags": [
           "Root"
+        ]
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "description": "Returns the current placeholder user for local development.",
+        "operationId": "get_me_api_v1_auth_me_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-User-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CurrentUser"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get current user",
+        "tags": [
+          "Auth"
         ]
       }
     },
@@ -238,6 +633,331 @@
           "Health"
         ]
       }
+    },
+    "/api/v1/notebooks": {
+      "get": {
+        "operationId": "list_notebooks_api_v1_notebooks_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "updatedAt",
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "default": "desc",
+              "title": "Order",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-User-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List notebooks",
+        "tags": [
+          "Notebooks"
+        ]
+      },
+      "post": {
+        "operationId": "create_notebook_api_v1_notebooks_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-User-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotebookCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create notebook",
+        "tags": [
+          "Notebooks"
+        ]
+      }
+    },
+    "/api/v1/notebooks/{notebook_id}": {
+      "delete": {
+        "operationId": "delete_notebook_api_v1_notebooks__notebook_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "notebook_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Notebook Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-User-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete notebook",
+        "tags": [
+          "Notebooks"
+        ]
+      },
+      "get": {
+        "operationId": "get_notebook_api_v1_notebooks__notebook_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "notebook_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Notebook Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-User-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get notebook",
+        "tags": [
+          "Notebooks"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_notebook_api_v1_notebooks__notebook_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "notebook_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Notebook Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-User-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotebookPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch notebook",
+        "tags": [
+          "Notebooks"
+        ]
+      }
     }
   },
   "tags": [
@@ -248,6 +968,14 @@
     {
       "description": "Liveness and readiness probes used by orchestrators (Kubernetes, Docker Compose) to monitor the service.",
       "name": "Health"
+    },
+    {
+      "description": "Placeholder current-user endpoint for local development.",
+      "name": "Auth"
+    },
+    {
+      "description": "Owner-scoped Notebook CRUD and offline-first sync endpoints.",
+      "name": "Notebooks"
     }
   ]
 }

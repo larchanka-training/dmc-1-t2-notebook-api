@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     oauth_name_secret_key: str = "change-me"
     token_ttl_seconds: int = 86400
     session_ttl_seconds: int = 604800
+    cors_allowed_origins: list[str] = ["http://localhost:5173", "http://notebook.com"]
+    cors_allowed_origin_regex: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
