@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import Select, func, select
@@ -57,6 +58,9 @@ class NotebookRepository:
         self.db.refresh(notebook)
         return notebook
 
-    def soft_delete(self, notebook: Notebook) -> None:
+    def soft_delete(self, notebook: Notebook, deleted_at: datetime) -> Notebook:
+        notebook.deleted_at = deleted_at
         self.db.add(notebook)
         self.db.commit()
+        self.db.refresh(notebook)
+        return notebook

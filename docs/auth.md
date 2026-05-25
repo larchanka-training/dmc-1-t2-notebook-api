@@ -352,6 +352,10 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 можно передать `X-User-Id: <uuid>`. В real-auth режиме будет
 `Authorization: Bearer <access>`.
 
+В placeholder-режиме валидный `X-User-Id`, которого ещё нет в `app.users`,
+создаёт dev-only placeholder user row. Это нужно только для локальной разработки,
+чтобы `notebooks.owner_id` не падал на FK при создании notebook.
+
 **Response 200:**
 ```json
 { "id": "uuid", "email": "user@example.com", "displayName": null, "roles": [] }

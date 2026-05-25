@@ -1,7 +1,10 @@
 from uuid import UUID
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy.orm import Session
 
+from app.core.db import get_db
+from app.modules.auth.repositories.user_repository import UserRepository
 from app.modules.auth.schemas.user_schemas import CurrentUser
 
 DEV_USER = CurrentUser(
@@ -14,14 +17,31 @@ DEV_USER = CurrentUser(
 
 def get_current_user(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    db: Session = Depends(get_db),
 ) -> CurrentUser:
     if x_user_id is None:
+        UserRepository(db).get_or_create_placeholder_user(
+            DEV_USER.id,
+            DEV_USER.email or "dev@notebook.local",
+            DEV_USER.display_name,
+        )
         return DEV_USER
 
     try:
-        return CurrentUser(id=UUID(x_user_id), roles=[])
+        user_id = UUID(x_user_id)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "UNAUTHORIZED", "message": "Invalid X-User-Id"},
         ) from exc
+
+    user = UserRepository(db).get_or_create_placeholder_user(
+        user_id,
+        f"{user_id}@dev.notebook.local",
+    )
+    return CurrentUser(
+        id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        roles=[],
+    )

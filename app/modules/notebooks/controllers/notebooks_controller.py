@@ -26,6 +26,12 @@ def get_notebook_service(db: Session = Depends(get_db)) -> NotebookService:
     "",
     response_model=NotebookResponse,
     status_code=status.HTTP_201_CREATED,
+    responses={
+        200: {
+            "model": NotebookResponse,
+            "description": "Notebook already existed for this owner",
+        }
+    },
     summary="Create notebook",
 )
 def create_notebook(

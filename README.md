@@ -103,6 +103,8 @@ Response envelope (`HealthResponse`):
 Issue #73 adds a dev-only placeholder user context and owner-scoped Notebook API.
 Real OTP/JWT auth is a follow-up; during local development the API falls back to
 the seeded dev user unless `X-User-Id` is provided.
+When a valid `X-User-Id` does not exist yet, the placeholder dependency creates
+a dev-only user row so notebook inserts do not fail on the `owner_id` foreign key.
 
 ```bash
 curl http://127.0.0.1:8000/api/v1/auth/me

@@ -27,6 +27,7 @@ def test_get_me_uses_x_user_id_header(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json()["id"] == str(user_id)
+    assert response.json()["email"] == f"{user_id}@dev.notebook.local"
 
 
 def test_get_me_rejects_invalid_x_user_id(client: TestClient) -> None:

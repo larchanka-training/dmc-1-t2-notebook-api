@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -8,8 +9,10 @@ from fastapi import HTTPException, status
 from app.core.time import datetime_to_unix_ms, unix_ms_to_datetime
 from app.modules.auth.schemas.user_schemas import CurrentUser
 from app.modules.notebooks.models.notebook import Notebook
-from app.modules.notebooks.repositories.notebook_repository import NotebookRepository, SORT_COLUMNS
+from app.modules.notebooks.repositories.notebook_repository import NotebookRepository
 from app.modules.notebooks.schemas.notebook_schemas import (
+    ALLOWED_ORDERS,
+    ALLOWED_SORTS,
     CURRENT_FORMAT_VERSION,
     CellSchema,
     CellTombstone,
@@ -20,6 +23,8 @@ from app.modules.notebooks.schemas.notebook_schemas import (
     NotebookResponse,
 )
 from app.modules.notebooks.services.notebook_merge import merge_cells
+
+MAX_FUTURE_SKEW_MS = 5_000
 
 
 def notebook_not_found() -> HTTPException:
@@ -95,9 +100,9 @@ class NotebookService:
         sort: str,
         order: str,
     ) -> NotebookListResponse:
-        if sort not in SORT_COLUMNS:
+        if sort not in ALLOWED_SORTS:
             raise invalid_query("Unsupported sort field")
-        if order not in {"asc", "desc"}:
+        if order not in ALLOWED_ORDERS:
             raise invalid_query("Unsupported order")
 
         items, total = self.repository.list_by_owner(
@@ -143,8 +148,7 @@ class NotebookService:
     def delete(self, current_user: CurrentUser, notebook_id: UUID) -> None:
         notebook = self._get_active_notebook(notebook_id)
         self._ensure_owner(notebook, current_user)
-        notebook.deleted_at = datetime.now(UTC)
-        self.repository.soft_delete(notebook)
+        self.repository.soft_delete(notebook, datetime.now(UTC))
 
     def _get_active_notebook(self, notebook_id: UUID) -> Notebook:
         notebook = self.repository.get_by_id(notebook_id)
@@ -165,13 +169,15 @@ class NotebookService:
         cells: list[dict],
         fallback: datetime,
     ) -> datetime:
-        fallback_ms = datetime_to_unix_ms(fallback)
         if not cells:
             return fallback
-        latest = max(int(cell["updatedAt"]) for cell in cells)
-        return unix_ms_to_datetime(max(latest, fallback_ms))
+        latest_cell_ms = max(int(cell["updatedAt"]) for cell in cells)
+        now_ms = int(time.time() * 1000)
+        latest = min(latest_cell_ms, now_ms + MAX_FUTURE_SKEW_MS)
+        return unix_ms_to_datetime(latest)
 
     def _cells_to_storage(self, cells: list[CellSchema]) -> list[dict]:
+        # Keep JSONB cells API-shaped; FE sync depends on camelCase keys.
         return [
             cell.model_dump(by_alias=True, mode="json")
             for cell in cells

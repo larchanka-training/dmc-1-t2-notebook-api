@@ -24,6 +24,8 @@ class Notebook(Base):
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     format_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Cells are stored in API-shaped camelCase per the FE/BE contract.
+    # Changing this requires a data migration and coordinated FE update.
     cells: Mapped[list[dict]] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"),
         nullable=False,

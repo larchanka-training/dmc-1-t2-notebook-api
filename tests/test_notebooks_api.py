@@ -1,8 +1,10 @@
+import time
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
+from app.modules.notebooks.services.notebook_service import MAX_FUTURE_SKEW_MS
 
 
 def _payload(notebook_id: str | None = None, cell_id: str | None = None) -> dict:
@@ -36,6 +38,19 @@ def test_create_notebook_without_id(client: TestClient) -> None:
     assert payload["cells"][0]["updatedAt"] == 1779367200000
 
 
+def test_top_level_updated_at_is_capped_by_server_time(client: TestClient) -> None:
+    future_ms = 9_999_999_999_999
+    payload = _payload()
+    payload["cells"][0]["updatedAt"] = future_ms
+
+    response = client.post(f"{settings.api_prefix}/notebooks", json=payload)
+
+    assert response.status_code == 201
+    assert response.json()["updatedAt"] < future_ms
+    assert response.json()["updatedAt"] <= int(time.time() * 1000) + MAX_FUTURE_SKEW_MS
+    assert response.json()["cells"][0]["updatedAt"] == future_ms
+
+
 def test_create_notebook_with_client_id_is_idempotent(client: TestClient) -> None:
     notebook_id = str(uuid4())
 
@@ -59,6 +74,19 @@ def test_create_existing_id_for_another_owner_returns_forbidden(client: TestClie
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "FORBIDDEN"
+
+
+def test_create_with_new_x_user_id_creates_placeholder_owner(client: TestClient) -> None:
+    user_id = str(uuid4())
+
+    response = client.post(
+        f"{settings.api_prefix}/notebooks",
+        json=_payload(str(uuid4())),
+        headers={"X-User-Id": user_id},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["ownerId"] == user_id
 
 
 def test_list_notebooks_is_owner_scoped_and_paginated(client: TestClient) -> None:

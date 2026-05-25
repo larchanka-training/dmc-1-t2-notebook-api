@@ -29,6 +29,7 @@ def db_session() -> Generator[Session, None, None]:
     @event.listens_for(engine, "connect")
     def attach_app_schema(dbapi_connection, connection_record) -> None:  # type: ignore[no-untyped-def]
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS app")
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     Base.metadata.create_all(bind=engine)
     factory = sessionmaker(
