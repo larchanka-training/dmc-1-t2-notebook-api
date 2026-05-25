@@ -174,19 +174,16 @@ class NotebookService:
         latest_cell_ms = max(int(cell["updatedAt"]) for cell in cells)
         now_ms = int(time.time() * 1000)
         latest = min(latest_cell_ms, now_ms + MAX_FUTURE_SKEW_MS)
+        latest = max(latest, datetime_to_unix_ms(fallback))
         return unix_ms_to_datetime(latest)
 
     def _cells_to_storage(self, cells: list[CellSchema]) -> list[dict]:
         # Keep JSONB cells API-shaped; FE sync depends on camelCase keys.
-        return [
-            cell.model_dump(by_alias=True, mode="json")
-            for cell in cells
-        ]
+        return [cell.model_dump(by_alias=True, mode="json") for cell in cells]
 
     def _tombstones_to_storage(self, tombstones: list[CellTombstone]) -> list[dict]:
         return [
-            tombstone.model_dump(by_alias=True, mode="json")
-            for tombstone in tombstones
+            tombstone.model_dump(by_alias=True, mode="json") for tombstone in tombstones
         ]
 
     def to_response(self, notebook: Notebook) -> NotebookResponse:
