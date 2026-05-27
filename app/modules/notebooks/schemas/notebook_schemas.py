@@ -1,7 +1,7 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
 CURRENT_FORMAT_VERSION = 1
@@ -36,6 +36,13 @@ class NotebookBase(BaseModel):
         default_factory=list, max_length=MAX_CELLS_PER_NOTEBOOK
     )
 
+    @model_validator(mode="after")
+    def validate_unique_cell_ids(self) -> "NotebookBase":
+        ids = [cell.id for cell in self.cells]
+        if len(ids) != len(set(ids)):
+            raise ValueError("cells must have unique ids")
+        return self
+
 
 class NotebookCreate(NotebookBase):
     id: UUID | None = None
@@ -43,6 +50,13 @@ class NotebookCreate(NotebookBase):
 
 class NotebookPatch(NotebookBase):
     deleted_cells: list[CellTombstone] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_unique_deleted_cell_ids(self) -> "NotebookPatch":
+        ids = [cell.id for cell in self.deleted_cells]
+        if len(ids) != len(set(ids)):
+            raise ValueError("deleted_cells must have unique ids")
+        return self
 
 
 class NotebookResponse(NotebookBase):

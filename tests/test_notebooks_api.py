@@ -250,3 +250,53 @@ def test_create_rejects_too_many_cells(client: TestClient) -> None:
     }
     response = client.post("/api/v1/notebooks", json=payload)
     assert response.status_code == 422
+
+
+def test_create_rejects_duplicate_cell_ids(client: TestClient) -> None:
+    cell_id = str(uuid4())
+    payload = {
+        "title": "duplicate cells",
+        "formatVersion": 1,
+        "cells": [
+            {
+                "id": cell_id,
+                "kind": "code",
+                "content": "first",
+                "updatedAt": 1000,
+            },
+            {
+                "id": cell_id,
+                "kind": "markdown",
+                "content": "second",
+                "updatedAt": 2000,
+            },
+        ],
+    }
+
+    response = client.post(f"{settings.api_prefix}/notebooks", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_patch_rejects_duplicate_deleted_cell_ids(client: TestClient) -> None:
+    notebook_id = str(uuid4())
+    cell_id = str(uuid4())
+
+    client.post(f"{settings.api_prefix}/notebooks", json=_payload(notebook_id, cell_id))
+
+    response = client.patch(
+        f"{settings.api_prefix}/notebooks/{notebook_id}",
+        json={
+            "title": "duplicate tombstones",
+            "formatVersion": 1,
+            "cells": [],
+            "deletedCells": [
+                {"id": cell_id, "deletedAt": 1000},
+                {"id": cell_id, "deletedAt": 2000},
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
