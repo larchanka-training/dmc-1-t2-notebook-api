@@ -98,6 +98,98 @@ Response envelope (`HealthResponse`):
 }
 ```
 
+## Placeholder auth and notebooks
+
+Issue #73 adds a dev-only placeholder user context and owner-scoped Notebook API.
+Real OTP/JWT auth is a follow-up; during local development the API falls back to
+the seeded dev user unless `X-User-Id` is provided.
+When a valid `X-User-Id` does not exist yet, the placeholder dependency creates
+a dev-only user row so notebook inserts do not fail on the `owner_id` foreign key.
+
+```bash
+curl http://127.0.0.1:8000/api/v1/auth/me
+curl http://127.0.0.1:8000/api/v1/auth/me -H 'X-User-Id: 11111111-1111-1111-1111-111111111111'
+```
+
+Placeholder response:
+
+```json
+{
+  "id": "00000000-0000-0000-0000-000000000001",
+  "email": "dev@notebook.local",
+  "displayName": "Dev User",
+  "roles": []
+}
+```
+
+Notebook endpoints:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/v1/notebooks` | Create a notebook. Client-generated `id` is optional and supported for offline-first flows. |
+| `GET /api/v1/notebooks` | List current user's active notebooks with `limit`, `offset`, `sort`, `order`. |
+| `GET /api/v1/notebooks/{id}` | Return a full notebook including `cells`. |
+| `PATCH /api/v1/notebooks/{id}` | Merge/update a notebook with LWW per-cell conflict handling. |
+| `DELETE /api/v1/notebooks/{id}` | Soft-delete a notebook. |
+
+Create example:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/notebooks \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "title": "Smoke",
+    "formatVersion": 1,
+    "cells": [
+      {
+        "id": "22222222-2222-2222-2222-222222222222",
+        "kind": "code",
+        "content": "console.log(1)",
+        "updatedAt": 1779367200000
+      }
+    ]
+  }'
+```
+
+Patch example with request-only tombstones:
+
+```json
+{
+  "title": "Smoke patched",
+  "formatVersion": 1,
+  "cells": [
+    {
+      "id": "22222222-2222-2222-2222-222222222222",
+      "kind": "code",
+      "content": "console.log(2)",
+      "updatedAt": 1779367500000
+    }
+  ],
+  "deletedCells": [
+    {
+      "id": "33333333-3333-3333-3333-333333333333",
+      "deletedAt": 1779367600000
+    }
+  ]
+}
+```
+
+Notebook JSON uses `formatVersion`, `kind`, `content`, and Unix timestamps in
+milliseconds. Execution output and UI runtime state are not persisted in
+Notebook JSON v1.
+
+New public API errors use a shared envelope:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Request validation failed",
+    "fields": {}
+  }
+}
+```
+
 ## Run tests
 
 ```bash

@@ -2,7 +2,11 @@
 
 > Архитектурный документ. Целевая модель авторизации и хранения данных для JS Notebook (api). Соответствует требованиям TARDIS-15.
 >
-> Документ описывает **целевое** состояние. Текущий код (`/auth/login` с password) — temporary заглушка, подлежит замене на OTP-flow отдельным тикетом.
+> Документ разделяет **текущее MVP-состояние PR #29** и **целевую**
+> OTP/JWT-модель. В PR #29 реализован placeholder auth:
+> `CurrentUser`, `get_current_user`, dev/test/local `X-User-Id`,
+> `DEV_USER` fallback и `GET /api/v1/auth/me`. Реальная OTP/JWT-авторизация
+> реализуется отдельной задачей без изменения notebook controllers.
 
 ## Содержание
 
@@ -72,8 +76,8 @@ POST /api/v1/auth/logout  → revoke session
 
 - **User создаётся лениво.** При первом успешном `otp/verify` для нового email — создаётся запись в `users`. Отдельной регистрации нет.
 - **OTP одноразовый.** После успешного verify помечается `used_at` и больше не принимается.
-При `POST /api/v1/auth/refresh` старый токен помечается как `replaced` и линкуется на своего преемника.
-Прочие сессии пользователя
+- **Refresh rotation.** При `POST /api/v1/auth/refresh` старый токен помечается как `replaced` и линкуется на своего преемника.
+- **Прочие сессии пользователя не отзываются** при refresh-token reuse одной сессии.
 - **Logout — серверный.** Помечает `sessions.revoked_at`. Любая последующая попытка refresh с этим токеном → 401.
 - **Access не отзывается.** При logout фронт сразу выкидывает access из памяти, но любой in-flight запрос с этим access успешно отработает до его `exp`. Это осознанный trade-off в пользу простоты и performance (никаких blocklist-проверок на каждый запрос).
 
@@ -118,6 +122,17 @@ POST /api/v1/auth/logout  → revoke session
 
 ### 4.1. `users`
 
+**Текущее MVP-состояние PR #29:**
+
+| Колонка | Тип | Описание |
+|---|---|---|
+| `id` | `uuid` PK | Идентификатор пользователя. |
+| `email` | `text` UNIQUE NOT NULL | Email. Для placeholder users используется synthetic email вида `<uuid>@dev.notebook.local`. |
+| `display_name` | `text` NULL | Опционально, для UI. |
+| `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
+
+**Целевая real-auth схема после OTP/JWT задачи:**
+
 | Колонка | Тип | Описание |
 |---|---|---|
 | `id` | `uuid` PK | Идентификатор пользователя. |
@@ -128,6 +143,8 @@ POST /api/v1/auth/logout  → revoke session
 | `biometric_snapshot` | `jsonb` NULL | Placeholder для будущей биометрии (см. §10). |
 
 ### 4.2. `otps`
+
+> Future real-auth schema. Таблица не входит в PR #29.
 
 | Колонка | Тип | Описание |
 |---|---|---|
@@ -145,6 +162,8 @@ POST /api/v1/auth/logout  → revoke session
 - TTL-cleanup через cron: `DELETE FROM otps WHERE expires_at < now() - interval '1 day'`.
 
 ### 4.3. `sessions`
+
+> Future real-auth schema. Таблица не входит в PR #29.
 
 Метаданные сессии. Одна запись — одна «авторизация» пользователя (логин с одного устройства → logout или истечение).
 
@@ -164,6 +183,8 @@ POST /api/v1/auth/logout  → revoke session
 > `refresh_token_hash` в этой таблице НЕ хранится. История токенов сессии — в `refresh_tokens` (§4.4).
 
 ### 4.4. `refresh_tokens` (token family)
+
+> Future real-auth schema. Таблица не входит в PR #29.
 
 Цепочка refresh-токенов в пределах одной сессии. Нужна для reuse-detection (§2.2, §5.3).
 
@@ -195,16 +216,15 @@ POST /api/v1/auth/logout  → revoke session
 |---|---|---|
 | `id` | `uuid` PK | |
 | `owner_id` | `uuid` FK → users.id NOT NULL | |
-| `title` | `text` NOT NULL | |
-| `format_version` | `int` NOT NULL DEFAULT 1 | См. §7 о версионировании. |
+| `title` | `varchar(255)` NOT NULL | |
+| `format_version` | `int` NOT NULL DEFAULT 1, CHECK `format_version >= 1` | См. §7 о версионировании. |
 | `cells` | `jsonb` NOT NULL DEFAULT '[]' | Массив ячеек, см. §7.2. |
 | `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
-| `updated_at` | `timestamptz` NOT NULL DEFAULT now() | Обновляется на каждом save. Равен `max(cells[].updatedAt, notebook.updated_at)`. |
+| `updated_at` | `timestamptz` NOT NULL DEFAULT now() | Серверное время последнего сохранения notebook с учётом client cell timestamps. Используется для сортировки списка notebooks. |
 | `deleted_at` | `timestamptz` NULL | Soft-delete. |
 
 **Индексы:**
-- `(owner_id, updated_at DESC)` — список ноутбуков пользователя.
-- Partial index `(owner_id) WHERE deleted_at IS NULL`.
+- Partial index `(owner_id, updated_at DESC) WHERE deleted_at IS NULL` — список активных notebooks пользователя, отсортированный по времени обновления.
 
 ---
 
@@ -213,7 +233,13 @@ POST /api/v1/auth/logout  → revoke session
 Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error envelope:
 
 ```json
-{ "code": "machine_readable_code", "message": "Human readable" }
+{
+  "error": {
+    "code": "machine_readable_code",
+    "message": "Human readable",
+    "fields": {}
+  }
+}
 ```
 
 ### 5.1. `POST /api/v1/auth/otp/request`
@@ -229,8 +255,11 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 
 **Response — dev/local/test (`APP_ENV in (dev, local, test)`):** `200 OK`:
 ```json
-{ "otp": "123456", "expiresAt": "2026-05-21T10:05:00Z" }
+{ "otp": "123456", "expiresAt": 1779367500000 }
 ```
+
+`expiresAt` — Unix timestamp в миллисекундах (`number`), как и остальные
+timestamps в FE/BE JSON-контрактах.
 
 **Errors:**
 - `400 invalid_email` — невалидный формат.
@@ -255,14 +284,14 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 {
   "accessToken": "eyJhbGciOi...",
   "refreshToken": "r7K3...base64url...",
-  "user": { "id": "uuid", "email": "user@example.com", "displayName": null }
+  "user": { "id": "uuid", "email": "user@example.com", "displayName": null, "roles": [] }
 }
 ```
 
 **Errors:**
-- `400 invalid_otp` — код не совпал. `attempts += 1`. На 5-й неудаче OTP помечается `used_at = now()`.
-- `400 otp_expired` — `expires_at < now()`.
-- `400 otp_already_used` — повторная попытка использовать уже использованный код.
+- `401 invalid_otp` — код не совпал. `attempts += 1`. На 5-й неудаче OTP помечается `used_at = now()`.
+- `401 otp_expired` — `expires_at < now()`.
+- `401 otp_already_used` — повторная попытка использовать уже использованный код.
 
 **Side effects:**
 - Если user с этим email не существует — создаётся.
@@ -342,11 +371,21 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 
 ### 5.5. `GET /api/v1/auth/me`
 
-**Headers:** `Authorization: Bearer <access>`.
+**Headers:** в placeholder-режиме можно не передавать заголовки. Для dev/test
+можно передать `X-User-Id: <uuid>`. В real-auth режиме будет
+`Authorization: Bearer <access>`.
+
+Placeholder-режим включён только для `dev`/`test` окружений. В `production` и
+`staging` backend не принимает `X-User-Id` как источник identity и возвращает
+ошибку до появления real-auth реализации.
+
+В `dev`/`test` валидный `X-User-Id`, которого ещё нет в `app.users`, создаёт
+dev-only placeholder user row. Это нужно только для локальной разработки, чтобы
+`notebooks.owner_id` не падал на FK при создании notebook.
 
 **Response 200:**
 ```json
-{ "id": "uuid", "email": "user@example.com", "displayName": null }
+{ "id": "uuid", "email": "user@example.com", "displayName": null, "roles": [] }
 ```
 
 **Errors:**
@@ -384,13 +423,13 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
     "id": "cell-1",
     "kind": "code",
     "content": "console.log('hi')",
-    "updatedAt": "2026-05-21T10:00:00Z"
+    "updatedAt": 1779367200000
   },
   {
     "id": "cell-2",
     "kind": "markdown",
     "content": "## Hello",
-    "updatedAt": "2026-05-21T10:01:00Z"
+    "updatedAt": 1779367260000
   }
 ]
 ```
@@ -399,7 +438,7 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 - `id` — стабильный client-generated id (UUID v4 или short id). Не меняется при перемещении. Необходим для LWW.
 - `kind` — `'code'` или `'markdown'` (выровняли с `ui/src/features/notebook/domain/cell.ts`).
 - `content` — исходный текст. Для `code` — JavaScript. Для `markdown` — GFM.
-- `updatedAt` — ISO timestamp последнего изменения ячейки. Используется для LWW (§8).
+- `updatedAt` — Unix timestamp в миллисекундах (`number`) последнего изменения ячейки. Используется для LWW (§8).
 
 **Порядок ячеек** — порядок в массиве. Дополнительных полей для «order» не храним — это упрощает модель. При перемещении ячейки изменяется notebook-уровень `updated_at`, но не `cell.updatedAt`.
 
@@ -409,15 +448,19 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 
 - `notebooks.format_version` (`int`, начиная с `1`).
 - Source of truth — серверная константа `CURRENT_FORMAT_VERSION` (см. §9.2).
-- При изменении формата вводится migration step на бэке, который при чтении ноутбука с устаревшей `format_version` мигрирует его на лету.
+- В PR #29 миграции формата ещё не реализованы, потому что существует только `formatVersion = 1`.
+- При будущем изменении формата вводится migration step на бэке, который при чтении ноутбука с устаревшей `format_version` мигрирует его на лету.
 - Старые версии формата должны оставаться читаемыми в любом случае — никаких «ломающих» изменений без migration step.
 
 
 ### 7.4. Notebook API (краткий обзор)
 
-> Детальный контракт — отдельный тикет. Здесь — только shape, важный для auth/persistence.
+> Детальный контракт — PR #29 / issue #73. Здесь — shape, важный для auth/persistence.
 
-Все endpoint’ы требуют `Authorization: Bearer <access>`.
+В PR #29 notebook endpoint’ы используют placeholder `CurrentUser`. В
+`dev`/`test`/`local` identity берётся из `X-User-Id` или `DEV_USER` fallback. В
+real-auth режиме те же controllers будут использовать
+`Authorization: Bearer <access>`.
 
 | Method | Path | Description |
 |---|---|---|
@@ -434,10 +477,10 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
   "title": "My Notebook",
   "formatVersion": 1,
   "cells": [
-    { "id": "cell-1", "kind": "code", "content": "...", "updatedAt": "2026-05-21T10:00:00Z" }
+    { "id": "cell-1", "kind": "code", "content": "...", "updatedAt": 1779367200000 }
   ],
   "deletedCells": [
-    { "id": "cell-99", "deletedAt": "2026-05-21T10:05:00Z" }
+    { "id": "cell-99", "deletedAt": 1779367500000 }
   ]
 }
 ```
@@ -466,15 +509,33 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
      - Если ячейка есть только в client → взять client.
      - Если ячейка есть только в server → взять server.
      - Если в обоих → взять ту, у которой `updatedAt` больше (LWW).
+     - Если `client.updatedAt == server.updatedAt` → **server wins**. Это tie-breaker, то есть правило для ничьей, чтобы merge был детерминированным.
 5. Порядок ячеек — берём с client (last writer определяет порядок). Новые ячейки из server (которых нет в client) — добавляются в конец.
-6. `notebooks.updated_at = max(merged_cells[].updatedAt)`.
+6. Сервер пересчитывает top-level `notebooks.updated_at` отдельно от cell-level timestamps:
+   - если cells пустой массив — `notebooks.updated_at = server save time`;
+   - если cells есть — сервер берёт `max(merged_cells[].updatedAt)`, но ограничивает будущее значение через `server save time + MAX_FUTURE_SKEW_MS`;
+   - итоговое значение не может быть меньше `server save time`.
 
-> **О времени:** оба времени (`cell.updatedAt`, `deletedAt`) приходят с клиента. Сервер их не переопределяет. Clock skew — ограничение §8.2.
+Формула:
+
+```text
+notebooks.updated_at =
+  max(server_save_time, min(max(merged_cells[].updatedAt), server_save_time + 5000ms))
+```
+
+> **О времени:** `cell.updatedAt` и `deletedAt` приходят с клиента. Сервер НЕ
+> переписывает `cell.updatedAt` внутри JSONB cells. Ограничение применяется
+> только к top-level `notebooks.updated_at`, чтобы клиент с часами в будущем не
+> ломал сортировку списка notebooks.
 
 ### 8.2. Ограничения этой стратегии
 
 - **Edit war внутри одной ячейки** — изменения с «проигравшего» устройства теряются. Это врождённое ограничение LWW.
-- **Clock skew** — время берём с клиента. Если часы расходятся на минуты — LWW может выбрать «не ту» версию. Принимаем этот риск.
+- **Clock skew** — LWW внутри cells всё ещё зависит от клиентского `cell.updatedAt`.
+  Если часы клиента сильно расходятся, merge может выбрать «не ту» cell-версию.
+  Сервер не переписывает `cell.updatedAt`, чтобы не ломать offline-first sync.
+  Но top-level `notebooks.updated_at` ограничивается серверным cap, чтобы
+  испорченное клиентское время не ломало сортировку notebooks.
 - **Full CRDT** (например Yjs) — в backlog. Переход потребует перехода на другую модель хранения.
 
 ### 8.3. Удаление ячеек (request-only tombstones)
@@ -523,8 +584,8 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 
 ### 9.2. Source of truth для `format_version`
 
-- Константа «текущая версия» живёт в бэке: `app/modules/notebooks/format.py::CURRENT_FORMAT_VERSION` (планируемое расположение).
-- Эта константа экспортируется в OpenAPI-схему (`docs/openapi.json`) как `components.schemas.Notebook.properties.formatVersion.const` — чтобы фронт при регенерации типов видел точную версию контракта.
+- Константа «текущая версия» сейчас живёт в бэке: `app/modules/notebooks/schemas/notebook_schemas.py::CURRENT_FORMAT_VERSION`.
+- OpenAPI-схема (`docs/openapi.json`) экспортирует `formatVersion` с `default: 1` и `minimum: 1`. Это не `const`: верхняя граница проверяется сервисом, который отклоняет `formatVersion > CURRENT_FORMAT_VERSION`.
 - Фронт руками декларирует `MAX_SUPPORTED_FORMAT_VERSION` — это версия, на которую рассчитан код рендера. Она может отставать от бэка между deploy-ами.
 
 ### 9.3. Кто инкрементирует
@@ -541,7 +602,11 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 
 ### 9.4. Миграция при чтении
 
-При любом чтении ноутбука из базы бэк выполняет «migrate-on-read»:
+В PR #29 migrate-on-read ещё не реализован: единственная поддерживаемая версия
+формата — `1`, а `formatVersion > CURRENT_FORMAT_VERSION` отклоняется.
+
+Целевая стратегия для будущих версий: при любом чтении ноутбука из базы бэк
+выполняет «migrate-on-read»:
 
 ```python
 while notebook.format_version < CURRENT_FORMAT_VERSION:
@@ -550,7 +615,7 @@ while notebook.format_version < CURRENT_FORMAT_VERSION:
     notebook.format_version += 1
 ```
 
-- Миграции — явные, по одна на переход, живут в `app/modules/notebooks/format_migrations/`.
+- Миграции — явные, по одна на переход, будут жить в `app/modules/notebooks/format_migrations/`.
 - Результат миграции записывается в базу при ближайшем успешном записывающем запросе (lazy persist). Пользовательский GET не должен блокироваться записью.
 - Старые версии обязаны оставаться читаемыми бэком всегда. Удаление миграции возможно только после явного backfill (UPDATE всех записей в базе до текущей версии).
 
@@ -632,4 +697,3 @@ while notebook.format_version < CURRENT_FORMAT_VERSION:
 - **Audit log**: отдельная таблица `auth_events` (login, logout, refresh_revoked, otp_failed)? Не в v1.
 
 [ui-auth]: https://github.com/larchanka-training/dmc-1-t2-notebook-ui/blob/main/docs/auth.md
-
