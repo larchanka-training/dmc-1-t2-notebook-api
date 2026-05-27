@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -184,9 +183,9 @@ class NotebookService:
         if not cells:
             return fallback
         latest_cell_ms = max(int(cell["updatedAt"]) for cell in cells)
-        now_ms = int(time.time() * 1000)
-        latest = min(latest_cell_ms, now_ms + MAX_FUTURE_SKEW_MS)
-        latest = max(latest, datetime_to_unix_ms(fallback))
+        fallback_ms = datetime_to_unix_ms(fallback)
+        latest = min(latest_cell_ms, fallback_ms + MAX_FUTURE_SKEW_MS)
+        latest = max(latest, fallback_ms)
         return unix_ms_to_datetime(latest)
 
     def _cells_to_storage(self, cells: list[CellSchema]) -> list[dict]:
