@@ -234,8 +234,11 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 
 **Response — dev/local/test (`APP_ENV in (dev, local, test)`):** `200 OK`:
 ```json
-{ "otp": "123456", "expiresAt": "2026-05-21T10:05:00Z" }
+{ "otp": "123456", "expiresAt": 1779367500000 }
 ```
+
+`expiresAt` — Unix timestamp в миллисекундах (`number`), как и остальные
+timestamps в FE/BE JSON-контрактах.
 
 **Errors:**
 - `400 invalid_email` — невалидный формат.
@@ -265,9 +268,9 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 ```
 
 **Errors:**
-- `400 invalid_otp` — код не совпал. `attempts += 1`. На 5-й неудаче OTP помечается `used_at = now()`.
-- `400 otp_expired` — `expires_at < now()`.
-- `400 otp_already_used` — повторная попытка использовать уже использованный код.
+- `401 invalid_otp` — код не совпал. `attempts += 1`. На 5-й неудаче OTP помечается `used_at = now()`.
+- `401 otp_expired` — `expires_at < now()`.
+- `401 otp_already_used` — повторная попытка использовать уже использованный код.
 
 **Side effects:**
 - Если user с этим email не существует — создаётся.
