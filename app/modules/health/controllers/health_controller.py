@@ -1,3 +1,10 @@
+"""HTTP controller for ``/health`` and ``/health/ready``.
+
+Probe-эндпоинты для оркестратора. Логику собирают функции из
+:mod:`app.modules.health.services`, контроллер только адаптирует
+коды состояния (200/503).
+"""
+
 from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.orm import Session
 
@@ -36,6 +43,14 @@ router = APIRouter(prefix="/health", tags=["Health"])
     },
 )
 def healthcheck() -> HealthResponse:
+    """``GET /health`` — liveness probe.
+
+    Не лезет в БД и в зависимости. Достаточно для ``livenessProbe``
+    Kubernetes.
+
+    Returns:
+        :class:`HealthResponse` со статусом ``"ok"``.
+    """
     return build_liveness()
 
 
@@ -90,6 +105,18 @@ def healthcheck() -> HealthResponse:
     },
 )
 def readiness(response: Response, db: Session = Depends(get_db)) -> HealthResponse:
+    """``GET /health/ready`` — readiness probe (checks the database).
+
+    При сбое любого критичного компонента статус ответа меняется на
+    503, чтобы оркестратор временно выкинул pod из балансировки.
+
+    Args:
+        response: FastAPI-объект ответа (нужен для смены статуса).
+        db: SQLAlchemy-сессия из :func:`get_db`.
+
+    Returns:
+        Заполненный :class:`HealthResponse`.
+    """
     result = build_readiness(db)
     if result.status != "ok":
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE

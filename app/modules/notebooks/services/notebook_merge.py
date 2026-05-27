@@ -1,8 +1,43 @@
+"""LWW merge algorithm for notebook cells.
+
+Сердце offline-first синхронизации. На вход — три потока:
+
+* ``server_cells`` — то, что лежит в БД сейчас;
+* ``client_cells`` — то, что прислал клиент;
+* ``deleted_cells`` — клиентские «надгробия».
+
+Правила:
+
+1. Если ячейка есть только у одной стороны — она и побеждает.
+2. Если есть у обеих — побеждает с большим ``updatedAt`` (LWW).
+3. При **равном** ``updatedAt`` побеждает server — это даёт
+   детерминизм независимо от порядка прихода запросов (Шаг 3 PR #29).
+4. Tombstone из ``deleted_cells`` удаляет ячейку, **если** server не
+   изменил её позже своего ``deletedAt`` — иначе server-версия живёт
+   дальше (классическая защита от «удалил оффлайн, но потом отредактил»).
+
+Порядок результата:
+* сначала идут ячейки в порядке клиента (он отвечает за визуальную
+  раскладку),
+* потом дописываются те server-ячейки, которых клиент не знал.
+"""
+
 from collections.abc import Iterable
 from typing import Any
 
 
 def _normalize_cell(cell: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of a cell with ``id`` coerced to ``str``.
+
+    UUID в JSONB бывает то ``UUID``, то ``str`` — приводим к одному
+    виду, чтобы безопасно класть в ``dict`` и сравнивать ключи.
+
+    Args:
+        cell: Сырой словарь ячейки (API-формат, camelCase).
+
+    Returns:
+        Копию словаря с гарантированно строковым ``id``.
+    """
     normalized = dict(cell)
     normalized["id"] = str(normalized["id"])
     return normalized
@@ -13,6 +48,23 @@ def merge_cells(
     client_cells: Iterable[dict[str, Any]],
     deleted_cells: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Merge server/client/tombstone cell streams using LWW with server-wins ties.
+
+    Чистая функция (без сайд-эффектов). Никаких сетевых вызовов или
+    обращений к БД — только перекладывание словарей. Это упрощает
+    юнит-тестирование и позволяет переиспользовать алгоритм при
+    необходимости (например, в фоновых задачах).
+
+    Args:
+        server_cells: Текущий набор ячеек из БД (API-формат).
+        client_cells: Набор, присланный клиентом.
+        deleted_cells: «Надгробия» удалённых клиентом ячеек.
+
+    Returns:
+        Итоговый список ячеек после слияния, отсортированный по
+        клиентскому порядку плюс хвост из неизвестных клиенту
+        server-ячеек.
+    """
     server_items = [_normalize_cell(cell) for cell in server_cells]
     client_items = [_normalize_cell(cell) for cell in client_cells]
     deleted_by_id = {str(item["id"]): int(item["deletedAt"]) for item in deleted_cells}

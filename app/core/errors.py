@@ -1,3 +1,16 @@
+"""Unified error envelope and FastAPI exception handlers.
+
+Все ошибки API возвращаются в едином виде::
+
+    {"error": {"code": str, "message": str, "fields": dict}}
+
+Здесь определены Pydantic-схемы этого «конверта» и три обработчика
+(валидация, ``HTTPException``, generic ``Exception``), которые
+устанавливаются на приложение через :func:`install_error_handlers`.
+Generic-обработчик намеренно не отдаёт ``str(exc)`` наружу, чтобы не
+утекали внутренние детали (см. Шаг 6 разбора PR #29).
+"""
+
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -8,12 +21,27 @@ from starlette.requests import Request
 
 
 class ApiError(BaseModel):
+    """Payload of a single API error.
+
+    Содержимое поля ``error`` в ответе. Используется FE для
+    локализации и анализа: код (``code``) стабилен и пригоден для
+    ``switch``-логики, ``message`` — текст для пользователя/лога,
+    ``fields`` — пер-полевые ошибки валидации.
+    """
+
     code: str
     message: str
     fields: dict[str, str] = Field(default_factory=dict)
 
 
 class ApiErrorResponse(BaseModel):
+    """Top-level error envelope returned by the API.
+
+    Внешняя «обёртка», чтобы у любого ответа об ошибке был один и тот
+    же ключ верхнего уровня. Эта схема также прокидывается в OpenAPI
+    как ``responses`` для роутов, чтобы FE-генератор типов знал форму.
+    """
+
     error: ApiError
 
 
@@ -23,6 +51,22 @@ def error_response(
     message: str,
     fields: dict[str, str] | None = None,
 ) -> JSONResponse:
+    """Build a ``JSONResponse`` shaped as the standard error envelope.
+
+    Хелпер, чтобы во всех обработчиках и сервисах конструировать ответ
+    одинаково. Если в роуте нужно вернуть «свою» ошибку, проще бросить
+    ``HTTPException(detail={"code": ..., "message": ...})``, а
+    обработчик внизу превратит её сюда.
+
+    Args:
+        status_code: HTTP-статус ответа.
+        code: Машиночитаемый код ошибки (``UPPER_SNAKE_CASE``).
+        message: Человекочитаемое сообщение.
+        fields: Карта «имя поля → причина», для валидационных ошибок.
+
+    Returns:
+        Готовый ``JSONResponse`` для возврата из обработчика.
+    """
     return JSONResponse(
         status_code=status_code,
         content={
@@ -36,6 +80,18 @@ def error_response(
 
 
 def _loc_to_field(loc: tuple[Any, ...]) -> str:
+    """Translate a Pydantic ``loc`` tuple to a dotted field path.
+
+    Pydantic возвращает позицию ошибки как ``("body", "cells", 3, "id")``.
+    Для клиентов удобнее видеть ``"cells[3].id"`` — этим занят хелпер.
+    Префикс ``body/query/path/header`` отбрасывается как технический.
+
+    Args:
+        loc: Кортеж локации из ``ValidationError``.
+
+    Returns:
+        Строка вида ``"cells[3].id"``.
+    """
     parts = list(loc)
     if parts and parts[0] in {"body", "query", "path", "header"}:
         parts = parts[1:]
@@ -50,6 +106,17 @@ def _loc_to_field(loc: tuple[Any, ...]) -> str:
 
 
 def install_error_handlers(app: FastAPI) -> None:
+    """Register the standard set of error handlers on a FastAPI app.
+
+    Подключает три обработчика, в порядке приоритета: валидация запросов
+    (422), штатные ``HTTPException`` (любой статус, заданный роутом),
+    и любые непойманные ``Exception`` (500). Вызывается один раз в
+    :mod:`app.main` при сборке приложения.
+
+    Args:
+        app: Инстанс FastAPI, к которому подключаются обработчики.
+    """
+
     @app.exception_handler(RequestValidationError)
     async def validation_handler(
         request: Request,

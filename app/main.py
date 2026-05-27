@@ -1,3 +1,18 @@
+"""FastAPI application factory and top-level wiring.
+
+Точка входа приложения. Здесь происходит вся «сборка»:
+
+* настройка логирования (:func:`configure_logging`);
+* создание ``FastAPI`` с OpenAPI-метаданными и тегами;
+* регистрация обработчиков ошибок (:func:`install_error_handlers`);
+* подключение CORS-middleware с разрешёнными origin;
+* монтаж роутеров модулей (``health``, ``auth``, ``notebooks``);
+* служебный ``GET /`` — простая «приветственная» проверка живости.
+
+Модуль не содержит бизнес-логики: всё, что относится к доменам,
+живёт в :mod:`app.modules`.
+"""
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -81,4 +96,13 @@ app.include_router(notebooks_router, prefix=settings.api_prefix)
     description="Returns a static welcome message; useful as a smoke test.",
 )
 def root() -> dict[str, str]:
+    """Return a static welcome payload at the service root.
+
+    Самый дешёвый smoke-эндпоинт: не лезет в БД, не требует auth,
+    подходит для healthcheck из docker-compose и для ручной проверки
+    «жив ли вообще процесс?».
+
+    Returns:
+        Словарь с единственным ключом ``"message"``.
+    """
     return {"message": "Welcome to MSD FastAPI Template"}

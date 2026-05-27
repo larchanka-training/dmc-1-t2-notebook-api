@@ -1,3 +1,10 @@
+"""HTTP controllers for ``/notebooks``.
+
+Тонкий слой: контроллеры разворачивают зависимости (текущий
+пользователь, сервис), вызывают метод сервиса и возвращают результат.
+Бизнес-логика и валидация инвариантов — в :class:`NotebookService`.
+"""
+
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response, status
@@ -20,6 +27,19 @@ router = APIRouter(prefix="/notebooks", tags=["Notebooks"])
 
 
 def get_notebook_service(db: Session = Depends(get_db)) -> NotebookService:
+    """Provide a request-scoped :class:`NotebookService`.
+
+    Сборка цепочки ``Session → Repository → Service``. Так каждый
+    запрос получает свой инстанс сервиса, привязанный к своей сессии,
+    и можно подменять зависимости в тестах через
+    ``app.dependency_overrides``.
+
+    Args:
+        db: Сессия из :func:`get_db`.
+
+    Returns:
+        Готовый к работе :class:`NotebookService`.
+    """
     return NotebookService(NotebookRepository(db))
 
 
@@ -45,6 +65,22 @@ def create_notebook(
     current_user: CurrentUser = Depends(get_current_user),
     service: NotebookService = Depends(get_notebook_service),
 ) -> NotebookResponse:
+    """``POST /notebooks`` — create or idempotently return a notebook.
+
+    Возвращает 201 при создании, 200 при идемпотентном повторе,
+    409 при идемпотентном повторе с другим содержимым. Подробности —
+    в :meth:`NotebookService.create`.
+
+    Args:
+        payload: Тело запроса с ``id`` (опционально), ``title``, ``cells``.
+        response: FastAPI-объект ответа (нужен, чтобы понизить статус
+            с 201 до 200 при идемпотентном попадании).
+        current_user: Авторизованный пользователь.
+        service: DI-инстанс сервиса.
+
+    Returns:
+        Созданный или существующий ноутбук.
+    """
     notebook, created = service.create(current_user, payload)
     if not created:
         response.status_code = status.HTTP_200_OK
@@ -64,6 +100,22 @@ def list_notebooks(
     current_user: CurrentUser = Depends(get_current_user),
     service: NotebookService = Depends(get_notebook_service),
 ) -> NotebookListResponse:
+    """``GET /notebooks`` — paginated list of the user's notebooks.
+
+    Query-параметры ``limit``/``offset`` валидируются FastAPI (``ge``/``le``);
+    ``sort``/``order`` валидируются сервисом по whitelist.
+
+    Args:
+        limit: Размер страницы (1..200, по умолчанию 50).
+        offset: Смещение (≥ 0).
+        sort: Поле сортировки (``updatedAt`` / ``createdAt`` / ``title``).
+        order: Направление (``asc`` / ``desc``).
+        current_user: Авторизованный пользователь.
+        service: DI-инстанс сервиса.
+
+    Returns:
+        Страница :class:`NotebookListResponse`.
+    """
     return service.list(current_user, limit, offset, sort, order)
 
 
@@ -77,6 +129,16 @@ def get_notebook(
     current_user: CurrentUser = Depends(get_current_user),
     service: NotebookService = Depends(get_notebook_service),
 ) -> NotebookResponse:
+    """``GET /notebooks/{id}`` — fetch a single notebook by id.
+
+    Args:
+        notebook_id: UUID ноутбука.
+        current_user: Авторизованный пользователь.
+        service: DI-инстанс сервиса.
+
+    Returns:
+        :class:`NotebookResponse`.
+    """
     return service.get(current_user, notebook_id)
 
 
@@ -91,6 +153,20 @@ def patch_notebook(
     current_user: CurrentUser = Depends(get_current_user),
     service: NotebookService = Depends(get_notebook_service),
 ) -> NotebookResponse:
+    """``PATCH /notebooks/{id}`` — apply offline sync document.
+
+    Тело — full sync document (полный набор ``cells`` + ``deletedCells``).
+    Сервер делает LWW-merge и возвращает обновлённый ноутбук.
+
+    Args:
+        notebook_id: UUID ноутбука.
+        payload: Sync-документ от клиента.
+        current_user: Авторизованный пользователь.
+        service: DI-инстанс сервиса.
+
+    Returns:
+        Обновлённый ноутбук после merge.
+    """
     return service.patch(current_user, notebook_id, payload)
 
 
@@ -104,4 +180,14 @@ def delete_notebook(
     current_user: CurrentUser = Depends(get_current_user),
     service: NotebookService = Depends(get_notebook_service),
 ) -> None:
+    """``DELETE /notebooks/{id}`` — soft-delete a notebook.
+
+    Физически запись остаётся в БД, но получает ``deleted_at``. Все
+    последующие чтения по этому id будут отдавать 404.
+
+    Args:
+        notebook_id: UUID ноутбука.
+        current_user: Авторизованный пользователь.
+        service: DI-инстанс сервиса.
+    """
     service.delete(current_user, notebook_id)

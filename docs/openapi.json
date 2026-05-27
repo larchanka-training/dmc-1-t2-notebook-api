@@ -2,6 +2,7 @@
   "components": {
     "schemas": {
       "ApiError": {
+        "description": "Payload of a single API error.\n\nСодержимое поля ``error`` в ответе. Используется FE для\nлокализации и анализа: код (``code``) стабилен и пригоден для\n``switch``-логики, ``message`` — текст для пользователя/лога,\n``fields`` — пер-полевые ошибки валидации.",
         "properties": {
           "code": {
             "title": "Code",
@@ -27,6 +28,7 @@
         "type": "object"
       },
       "ApiErrorResponse": {
+        "description": "Top-level error envelope returned by the API.\n\nВнешняя «обёртка», чтобы у любого ответа об ошибке был один и тот\nже ключ верхнего уровня. Эта схема также прокидывается в OpenAPI\nкак ``responses`` для роутов, чтобы FE-генератор типов знал форму.",
         "properties": {
           "error": {
             "$ref": "#/components/schemas/ApiError"
@@ -39,6 +41,7 @@
         "type": "object"
       },
       "CellSchema": {
+        "description": "Single notebook cell as exchanged over the API.\n\nАтомарная ячейка: код или markdown. ``updated_at`` ставит сам\nклиент (миллисекунды от эпохи) — сервер его не переписывает.\nЭто и есть основа LWW-синхронизации.",
         "properties": {
           "content": {
             "default": "",
@@ -74,6 +77,7 @@
         "type": "object"
       },
       "CellTombstone": {
+        "description": "Tombstone record for a cell deleted on the client.\n\nКлиент шлёт «надгробие», чтобы сервер при merge мог понять: эта\nячейка удалена локально с такой-то меткой времени. Если на сервере\nта же ячейка обновилась *позже* ``deleted_at`` — удаление\nигнорируется (см. :func:`merge_cells`).",
         "properties": {
           "deletedAt": {
             "minimum": 0.0,
@@ -94,6 +98,7 @@
         "type": "object"
       },
       "ComponentStatus": {
+        "description": "Health of a single dependency (e.g. database).\n\nОтражает статус одного «компонента». В minimal-варианте мы шлём\nтолько БД, но при росте сюда можно добавить кеш, очереди и т. п.",
         "examples": [
           {
             "name": "database",
@@ -144,7 +149,7 @@
         "type": "object"
       },
       "CurrentUser": {
-        "description": "Represents the current authenticated user.",
+        "description": "Represents the current authenticated user.\n\nDTO, который возвращает ``GET /auth/me`` и который кладётся в\nзависимостях защищённых роутов. ``alias_generator=to_camel`` нужен,\nчтобы JSON получил ``displayName`` (camelCase), а Python-код мог\nобращаться к ``display_name`` (snake_case).",
         "properties": {
           "displayName": {
             "anyOf": [
@@ -201,6 +206,7 @@
         "type": "object"
       },
       "HealthResponse": {
+        "description": "Top-level health envelope returned by both probes.\n\n``status=\"ok\"`` — всё штатно; ``\"degraded\"`` — какой-то компонент\nне отвечает. Liveness-эндпоинт всегда отдаёт ``\"ok\"`` без проверок\nзависимостей, readiness — реальный агрегированный статус.",
         "examples": [
           {
             "app": "MSD FastAPI Template",
@@ -264,6 +270,7 @@
         "type": "object"
       },
       "NotebookCreate": {
+        "description": "Request body for ``POST /notebooks``.\n\nОтличается от ``NotebookBase`` опциональным ``id``: если клиент\nего не присылает, сервер сгенерирует ``uuid4`` сам. Если присылает —\nсоздание становится идемпотентным (см. ``NotebookService.create``).",
         "properties": {
           "cells": {
             "items": {
@@ -305,6 +312,7 @@
         "type": "object"
       },
       "NotebookListItem": {
+        "description": "Lightweight notebook row for list endpoints.\n\nНе содержит ``cells`` — только их количество. Это сильно сокращает\npayload листинга и предотвращает выгрузку больших JSONB в ответ\nна ``GET /notebooks``.",
         "properties": {
           "cellsCount": {
             "title": "Cellscount",
@@ -344,6 +352,7 @@
         "type": "object"
       },
       "NotebookListResponse": {
+        "description": "Paginated response wrapper for ``GET /notebooks``.\n\nСтандартная «обёртка» с метаданными пагинации. ``total`` считается\nотдельным запросом и нужен фронту для построения нумерации страниц.",
         "properties": {
           "items": {
             "items": {
@@ -375,6 +384,7 @@
         "type": "object"
       },
       "NotebookPatch": {
+        "description": "Request body for ``PATCH /notebooks/{id}``.\n\nСейчас это «full sync document», а не классический partial PATCH:\nклиент шлёт полный массив активных ``cells`` плюс ``deletedCells``\n(надгробия) — сервер делает LWW-merge. Семантически это ближе к\nPUT; решение оставить как PATCH было сознательным (Шаг 9 PR #29).",
         "properties": {
           "cells": {
             "items": {
@@ -411,6 +421,7 @@
         "type": "object"
       },
       "NotebookResponse": {
+        "description": "Detailed notebook representation returned by single-item endpoints.\n\nИспользуется в ответах ``POST/GET/PATCH /notebooks/{id}``. Времена\nотдаются в миллисекундах от эпохи (UTC) — единый формат с фронтом.",
         "properties": {
           "cells": {
             "items": {
@@ -678,6 +689,7 @@
     },
     "/api/v1/notebooks": {
       "get": {
+        "description": "``GET /notebooks`` — paginated list of the user's notebooks.\n\nQuery-параметры ``limit``/``offset`` валидируются FastAPI (``ge``/``le``);\n``sort``/``order`` валидируются сервисом по whitelist.\n\nArgs:\n    limit: Размер страницы (1..200, по умолчанию 50).\n    offset: Смещение (≥ 0).\n    sort: Поле сортировки (``updatedAt`` / ``createdAt`` / ``title``).\n    order: Направление (``asc`` / ``desc``).\n    current_user: Авторизованный пользователь.\n    service: DI-инстанс сервиса.\n\nReturns:\n    Страница :class:`NotebookListResponse`.",
         "operationId": "list_notebooks_api_v1_notebooks_get",
         "parameters": [
           {
@@ -768,6 +780,7 @@
         ]
       },
       "post": {
+        "description": "``POST /notebooks`` — create or idempotently return a notebook.\n\nВозвращает 201 при создании, 200 при идемпотентном повторе,\n409 при идемпотентном повторе с другим содержимым. Подробности —\nв :meth:`NotebookService.create`.\n\nArgs:\n    payload: Тело запроса с ``id`` (опционально), ``title``, ``cells``.\n    response: FastAPI-объект ответа (нужен, чтобы понизить статус\n        с 201 до 200 при идемпотентном попадании).\n    current_user: Авторизованный пользователь.\n    service: DI-инстанс сервиса.\n\nReturns:\n    Созданный или существующий ноутбук.",
         "operationId": "create_notebook_api_v1_notebooks_post",
         "parameters": [
           {
@@ -847,6 +860,7 @@
     },
     "/api/v1/notebooks/{notebook_id}": {
       "delete": {
+        "description": "``DELETE /notebooks/{id}`` — soft-delete a notebook.\n\nФизически запись остаётся в БД, но получает ``deleted_at``. Все\nпоследующие чтения по этому id будут отдавать 404.\n\nArgs:\n    notebook_id: UUID ноутбука.\n    current_user: Авторизованный пользователь.\n    service: DI-инстанс сервиса.",
         "operationId": "delete_notebook_api_v1_notebooks__notebook_id__delete",
         "parameters": [
           {
@@ -897,6 +911,7 @@
         ]
       },
       "get": {
+        "description": "``GET /notebooks/{id}`` — fetch a single notebook by id.\n\nArgs:\n    notebook_id: UUID ноутбука.\n    current_user: Авторизованный пользователь.\n    service: DI-инстанс сервиса.\n\nReturns:\n    :class:`NotebookResponse`.",
         "operationId": "get_notebook_api_v1_notebooks__notebook_id__get",
         "parameters": [
           {
@@ -954,6 +969,7 @@
         ]
       },
       "patch": {
+        "description": "``PATCH /notebooks/{id}`` — apply offline sync document.\n\nТело — full sync document (полный набор ``cells`` + ``deletedCells``).\nСервер делает LWW-merge и возвращает обновлённый ноутбук.\n\nArgs:\n    notebook_id: UUID ноутбука.\n    payload: Sync-документ от клиента.\n    current_user: Авторизованный пользователь.\n    service: DI-инстанс сервиса.\n\nReturns:\n    Обновлённый ноутбук после merge.",
         "operationId": "patch_notebook_api_v1_notebooks__notebook_id__patch",
         "parameters": [
           {

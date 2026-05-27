@@ -1,3 +1,18 @@
+"""Business logic for notebook CRUD and offline-first sync.
+
+«Толстый» сервис домена ноутбуков. Контроллеры сюда передают
+:class:`CurrentUser` и DTO, сервис делает:
+
+* проверку владельца (owner-scoping);
+* валидацию ``formatVersion`` (поддерживается до ``CURRENT``);
+* идемпотентное создание (если ``id`` уже есть — сверка payload или 409);
+* merge ячеек на ``PATCH`` через :func:`merge_cells`;
+* мягкое удаление через ``deleted_at``.
+
+Здесь же лежат фабрики-помощники для типовых HTTPException — это
+гарантирует одинаковый ``error envelope`` во всех ответах сервиса.
+"""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -23,10 +38,14 @@ from app.modules.notebooks.schemas.notebook_schemas import (
 )
 from app.modules.notebooks.services.notebook_merge import merge_cells
 
+#: Допуск «вперёд» для клиентского ``updatedAt`` при вычислении
+#: top-level ``notebook.updated_at`` — защита от часов клиента,
+#: убежавших в будущее.
 MAX_FUTURE_SKEW_MS = 5_000
 
 
 def notebook_not_found() -> HTTPException:
+    """Build a 404 ``HTTPException`` with the standard error envelope."""
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail={"code": "NOTEBOOK_NOT_FOUND", "message": "Notebook not found"},
@@ -34,6 +53,7 @@ def notebook_not_found() -> HTTPException:
 
 
 def forbidden() -> HTTPException:
+    """Build a 403 ``HTTPException`` for owner-scope violations."""
     return HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail={"code": "FORBIDDEN", "message": "Forbidden"},
@@ -41,6 +61,11 @@ def forbidden() -> HTTPException:
 
 
 def invalid_query(message: str) -> HTTPException:
+    """Build a 400 ``HTTPException`` for malformed list-query params.
+
+    Используется, когда клиент прислал недопустимое значение ``sort``
+    или ``order`` — то, что не отлавливает Pydantic-валидация query.
+    """
     return HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail={"code": "INVALID_QUERY", "message": message},
@@ -48,6 +73,12 @@ def invalid_query(message: str) -> HTTPException:
 
 
 def unsupported_format_version() -> HTTPException:
+    """Build a 400 ``HTTPException`` when client format version is too new.
+
+    Сценарий: фронт обновился раньше бэка и шлёт ``formatVersion``,
+    которого сервер ещё не понимает. Лучше явно отказать, чем
+    проглотить «незнакомые» поля.
+    """
     return HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail={
@@ -58,6 +89,12 @@ def unsupported_format_version() -> HTTPException:
 
 
 def notebook_conflict(message: str) -> HTTPException:
+    """Build a 409 ``HTTPException`` for idempotency conflicts.
+
+    Бросаем, когда клиент повторил ``POST`` с тем же ``id``, но другим
+    содержимым — это уже не идемпотентность, это потерянный апдейт
+    (Шаг 10 PR #29).
+    """
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={"code": "NOTEBOOK_CONFLICT", "message": message},
@@ -65,7 +102,19 @@ def notebook_conflict(message: str) -> HTTPException:
 
 
 class NotebookService:
+    """Use-cases for notebook CRUD + offline sync (PATCH merge).
+
+    Слой бизнес-логики: знает про :class:`CurrentUser`, валидирует
+    инварианты домена, делегирует БД-операции репозиторию. Сюда не
+    проникают ни ``Session``, ни ``Request`` — только DTO.
+    """
+
     def __init__(self, repository: NotebookRepository) -> None:
+        """Bind the service to a notebook repository.
+
+        Args:
+            repository: Уже инициализированный :class:`NotebookRepository`.
+        """
         self.repository = repository
 
     def create(
@@ -73,6 +122,28 @@ class NotebookService:
         current_user: CurrentUser,
         payload: NotebookCreate,
     ) -> tuple[NotebookResponse, bool]:
+        """Create a notebook (idempotent on ``payload.id``).
+
+        Семантика:
+
+        * Если ``id`` ещё нет в БД → INSERT и возврат ``(notebook, True)``.
+        * Если ``id`` уже есть **и принадлежит другому owner** → 403.
+        * Если есть, но soft-deleted → 404 (как будто его нет).
+        * Если есть, owner совпадает, payload **идентичен** → 200 с
+          существующей записью и ``created=False``.
+        * Если есть, owner совпадает, payload **отличается** → 409.
+
+        Args:
+            current_user: Авторизованный пользователь.
+            payload: Тело запроса.
+
+        Returns:
+            Пара ``(NotebookResponse, created_flag)``.
+
+        Raises:
+            HTTPException: 403/404/409 в случаях выше; 400 при
+                несовместимой ``formatVersion``.
+        """
         notebook_id = payload.id or uuid4()
         existing = self.repository.get_by_id(notebook_id)
         if existing is not None:
@@ -111,6 +182,25 @@ class NotebookService:
         sort: str,
         order: str,
     ) -> NotebookListResponse:
+        """List active notebooks of the current user with pagination.
+
+        Прозрачно проксирует параметры в репозиторий, добавляя
+        белый список значений ``sort``/``order``. Возвращает
+        «лёгкую» проекцию (без поля ``cells``).
+
+        Args:
+            current_user: Авторизованный пользователь (фильтр по owner).
+            limit: Размер страницы.
+            offset: Смещение.
+            sort: Поле сортировки (валидируется по ``ALLOWED_SORTS``).
+            order: Направление (валидируется по ``ALLOWED_ORDERS``).
+
+        Returns:
+            Страница в виде :class:`NotebookListResponse`.
+
+        Raises:
+            HTTPException: 400, если ``sort`` или ``order`` вне whitelist.
+        """
         if sort not in ALLOWED_SORTS:
             raise invalid_query("Unsupported sort field")
         if order not in ALLOWED_ORDERS:
@@ -131,6 +221,18 @@ class NotebookService:
         )
 
     def get(self, current_user: CurrentUser, notebook_id: UUID) -> NotebookResponse:
+        """Return a single active notebook owned by the current user.
+
+        Args:
+            current_user: Авторизованный пользователь.
+            notebook_id: UUID ноутбука.
+
+        Returns:
+            Полная :class:`NotebookResponse`.
+
+        Raises:
+            HTTPException: 404, если нет/soft-deleted; 403, если чужой.
+        """
         notebook = self._get_active_notebook(notebook_id)
         self._ensure_owner(notebook, current_user)
         return self.to_response(notebook)
@@ -141,6 +243,25 @@ class NotebookService:
         notebook_id: UUID,
         payload: NotebookPatch,
     ) -> NotebookResponse:
+        """Apply a sync document to a notebook and persist the merge result.
+
+        «Сердечный» метод offline-first синхронизации. Берёт серверные
+        ячейки, ячейки клиента и тумбстоуны, прогоняет через
+        :func:`merge_cells`, пересчитывает top-level ``updated_at``
+        (с защитой от clock-skew) и сохраняет результат.
+
+        Args:
+            current_user: Авторизованный пользователь.
+            notebook_id: UUID ноутбука.
+            payload: Полный sync-документ от клиента.
+
+        Returns:
+            Обновлённая :class:`NotebookResponse`.
+
+        Raises:
+            HTTPException: 404, если ноутбук не найден/удалён; 403, если
+                чужой; 400 — несовместимая ``formatVersion``.
+        """
         notebook = self._get_active_notebook(notebook_id)
         self._ensure_owner(notebook, current_user)
         self._validate_format_version(payload.format_version)
@@ -157,21 +278,59 @@ class NotebookService:
         return self.to_response(self.repository.save(notebook))
 
     def delete(self, current_user: CurrentUser, notebook_id: UUID) -> None:
+        """Soft-delete a notebook owned by the current user.
+
+        Args:
+            current_user: Авторизованный пользователь.
+            notebook_id: UUID ноутбука.
+
+        Raises:
+            HTTPException: 404, если уже удалён или не найден; 403, если
+                принадлежит другому пользователю.
+        """
         notebook = self._get_active_notebook(notebook_id)
         self._ensure_owner(notebook, current_user)
         self.repository.soft_delete(notebook, datetime.now(UTC))
 
     def _get_active_notebook(self, notebook_id: UUID) -> Notebook:
+        """Return notebook by id or raise 404 if missing/deleted.
+
+        Args:
+            notebook_id: UUID.
+
+        Returns:
+            Активная ORM-запись.
+
+        Raises:
+            HTTPException: 404 в обоих сценариях «нет» и «soft-deleted».
+        """
         notebook = self.repository.get_by_id(notebook_id)
         if notebook is None or notebook.deleted_at is not None:
             raise notebook_not_found()
         return notebook
 
     def _ensure_owner(self, notebook: Notebook, current_user: CurrentUser) -> None:
+        """Raise 403 if the notebook does not belong to the user.
+
+        Args:
+            notebook: ORM-запись.
+            current_user: Авторизованный пользователь.
+
+        Raises:
+            HTTPException: 403 при несовпадении ``owner_id``.
+        """
         if notebook.owner_id != current_user.id:
             raise forbidden()
 
     def _validate_format_version(self, format_version: int) -> None:
+        """Raise 400 if client uses a format version newer than the server.
+
+        Args:
+            format_version: Версия формата из payload.
+
+        Raises:
+            HTTPException: 400 при ``format_version > CURRENT_FORMAT_VERSION``.
+        """
         if format_version > CURRENT_FORMAT_VERSION:
             raise unsupported_format_version()
 
@@ -180,6 +339,25 @@ class NotebookService:
         cells: list[dict],
         fallback: datetime,
     ) -> datetime:
+        """Compute top-level ``notebook.updated_at`` with clock-skew clamp.
+
+        Формула (см. ``docs/auth.md``)::
+
+            latest = min(max(cell.updatedAt), now + MAX_FUTURE_SKEW_MS)
+            latest = max(latest, now)
+
+        То есть top-level время не может «убежать» в будущее дальше,
+        чем на 5 секунд от серверного now, и не может быть «в прошлом»
+        относительно текущего сохранения. ``fallback`` — общий источник
+        времени (Шаг 16 PR #29: убрали второй ``time.time()``).
+
+        Args:
+            cells: Список ячеек в API-формате.
+            fallback: Серверное «сейчас», переданное снаружи.
+
+        Returns:
+            Итоговая метка времени для ``notebook.updated_at``.
+        """
         if not cells:
             return fallback
         latest_cell_ms = max(int(cell["updatedAt"]) for cell in cells)
@@ -189,10 +367,34 @@ class NotebookService:
         return unix_ms_to_datetime(latest)
 
     def _cells_to_storage(self, cells: list[CellSchema]) -> list[dict]:
-        # Keep JSONB cells API-shaped; FE sync depends on camelCase keys.
+        """Serialize Pydantic cells to the camelCase shape stored in JSONB.
+
+        FE и БД работают с camelCase (контракт), поэтому ``by_alias=True``.
+        ``mode="json"`` нужен, чтобы UUID и datetime превратились в
+        ``str``/``int`` — иначе сравнение «БД vs payload» давало бы
+        ложный mismatch на одинаковых данных.
+
+        Args:
+            cells: Список Pydantic-моделей ячеек.
+
+        Returns:
+            Список словарей в API-формате.
+        """
         return [cell.model_dump(by_alias=True, mode="json") for cell in cells]
 
     def _tombstones_to_storage(self, tombstones: list[CellTombstone]) -> list[dict]:
+        """Serialize tombstones to the API/JSONB shape.
+
+        Симметрично :meth:`_cells_to_storage`, но для надгробий.
+        В БД эти данные не попадают (они нужны только для merge), но
+        мы держим ту же сериализацию для единообразия.
+
+        Args:
+            tombstones: Pydantic-модели надгробий.
+
+        Returns:
+            Список словарей в API-формате.
+        """
         return [
             tombstone.model_dump(by_alias=True, mode="json") for tombstone in tombstones
         ]
@@ -200,6 +402,20 @@ class NotebookService:
     def _matches_create_payload(
         self, notebook: Notebook, payload: NotebookCreate
     ) -> bool:
+        """Tell whether an existing row matches an idempotent POST payload.
+
+        Сравниваем поля, которые формирует клиент: ``title``,
+        ``format_version``, ``cells``. Системные ``created_at`` и
+        ``owner_id`` намеренно вне сравнения.
+
+        Args:
+            notebook: Существующая ORM-запись.
+            payload: Тело повторного POST.
+
+        Returns:
+            ``True`` если данные идентичны (можно вернуть существующий),
+            ``False`` если есть расхождение (сервис бросит 409).
+        """
         return (
             notebook.title == payload.title
             and notebook.format_version == payload.format_version
@@ -207,6 +423,18 @@ class NotebookService:
         )
 
     def to_response(self, notebook: Notebook) -> NotebookResponse:
+        """Map an ORM ``Notebook`` to a public :class:`NotebookResponse`.
+
+        Времена переводятся в миллисекунды от эпохи, ``cells`` отдаются
+        в том виде, в котором лежат в JSONB. Это — единственная точка
+        проекции «БД → API» для деталки ноутбука.
+
+        Args:
+            notebook: ORM-объект.
+
+        Returns:
+            DTO для ответа.
+        """
         return NotebookResponse(
             id=notebook.id,
             owner_id=notebook.owner_id,
@@ -218,6 +446,18 @@ class NotebookService:
         )
 
     def to_list_item(self, notebook: Notebook) -> NotebookListItem:
+        """Map an ORM ``Notebook`` to a lightweight list item.
+
+        В отличие от :meth:`to_response`, ``cells`` *не отдаются* — только
+        их количество. Это бережёт пропускную способность для тяжёлых
+        ноутбуков и не нагружает фронт лишним JSON.
+
+        Args:
+            notebook: ORM-объект.
+
+        Returns:
+            «Тонкий» DTO для списка.
+        """
         return NotebookListItem(
             id=notebook.id,
             title=notebook.title,

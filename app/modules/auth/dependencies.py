@@ -1,3 +1,15 @@
+"""FastAPI dependencies for resolving the current user.
+
+Здесь живёт ``get_current_user`` — самая «горячая» dependency: каждый
+защищённый роут получает текущего пользователя через неё. До появления
+настоящего OTP/JWT мы используем placeholder-схему: клиент шлёт
+``X-User-Id`` (заголовок), сервер по нему достаёт или создаёт запись.
+
+Важно: placeholder работает **только** в dev/test/local. В prod/staging
+зависимость возвращает 501, чтобы случайно не выпустить «open access»
+в боевое окружение (см. Шаг 2 разбора PR #29).
+"""
+
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
@@ -20,6 +32,28 @@ def get_current_user(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     db: Session = Depends(get_db),
 ) -> CurrentUser:
+    """Resolve the current user from the ``X-User-Id`` header (dev only).
+
+    Поведение зависит от ``settings.app_env``:
+
+    * **dev/test/local**: при отсутствии заголовка возвращается
+      «дев-пользователь» (фиксированный UUID), при наличии — UUID из
+      заголовка валидируется и создаётся/получается ``User`` в БД.
+    * **production/staging/прочее**: запрос немедленно отклоняется с
+      ``501 AUTH_NOT_IMPLEMENTED`` — это страховка от того, что
+      placeholder-схема случайно «утечёт» в прод.
+
+    Args:
+        x_user_id: Значение заголовка ``X-User-Id`` (опционально).
+        db: SQLAlchemy-сессия, предоставленная :func:`get_db`.
+
+    Returns:
+        :class:`CurrentUser` для текущего запроса.
+
+    Raises:
+        HTTPException: 501, если ``app_env`` не dev/test/local;
+            401, если ``X-User-Id`` не парсится как UUID.
+    """
     # Placeholder auth is dev-only until real OTP/JWT auth lands.
     if settings.app_env not in {"dev", "test", "local"}:
         raise HTTPException(
