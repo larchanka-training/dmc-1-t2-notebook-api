@@ -300,3 +300,39 @@ def test_patch_rejects_duplicate_deleted_cell_ids(client: TestClient) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_create_rejects_title_too_long(client: TestClient) -> None:
+    payload = _payload()
+    payload["title"] = "x" * 256
+
+    response = client.post(f"{settings.api_prefix}/notebooks", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_patch_rejects_title_too_long(client: TestClient) -> None:
+    notebook_id = str(uuid4())
+    client.post(f"{settings.api_prefix}/notebooks", json=_payload(notebook_id))
+
+    payload = _payload()
+    payload["title"] = "x" * 256
+
+    response = client.patch(
+        f"{settings.api_prefix}/notebooks/{notebook_id}",
+        json=payload,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_create_rejects_format_version_below_one(client: TestClient) -> None:
+    payload = _payload()
+    payload["formatVersion"] = 0
+
+    response = client.post(f"{settings.api_prefix}/notebooks", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"

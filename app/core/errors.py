@@ -122,6 +122,11 @@ def install_error_handlers(app: FastAPI) -> None:
         request: Request,
         exc: RequestValidationError,
     ) -> JSONResponse:
+        """Turn Pydantic ``RequestValidationError`` into a 422 envelope.
+
+        Собирает все ошибки валидации в карту ``{field: message}`` и
+        возвращает стандартный конверт ``VALIDATION_ERROR``.
+        """
         fields = {
             _loc_to_field(tuple(error["loc"])): str(error["msg"])
             for error in exc.errors()
@@ -135,6 +140,12 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(HTTPException)
     async def http_handler(request: Request, exc: HTTPException) -> JSONResponse:
+        """Convert ``HTTPException`` into the standard error envelope.
+
+        Если в ``detail`` пришёл словарь со схемой
+        ``{"code", "message", "fields"}`` — переиспользуем поля; иначе
+        используем общий код ``HTTP_ERROR`` и текст ``detail``.
+        """
         code = "HTTP_ERROR"
         message = str(exc.detail)
         fields: dict[str, str] = {}
@@ -150,6 +161,12 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception) -> JSONResponse:
+        """Catch any other exception and return a safe 500 envelope.
+
+        Намеренно не пробрасывает ``str(exc)`` в ответ — иначе наружу
+        может уехать строка SQL, путь файла или другой внутренний
+        контекст (Шаг 6 разбора PR #29).
+        """
         return error_response(
             500,
             "INTERNAL_SERVER_ERROR",
