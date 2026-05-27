@@ -72,3 +72,13 @@ def test_merge_preserves_client_order_and_appends_server_only() -> None:
     )
 
     assert [cell["id"] for cell in result] == ["cell-2", "cell-1", "cell-3"]
+
+
+def test_merge_equal_timestamps_server_wins() -> None:
+    result = merge_cells(
+        [{"id": "cell-1", "kind": "code", "content": "server", "updatedAt": 2000}],
+        [{"id": "cell-1", "kind": "code", "content": "client", "updatedAt": 2000}],
+        [],
+    )
+
+    assert result[0]["content"] == "server"

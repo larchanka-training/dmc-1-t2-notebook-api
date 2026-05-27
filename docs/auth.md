@@ -195,16 +195,15 @@ POST /api/v1/auth/logout  → revoke session
 |---|---|---|
 | `id` | `uuid` PK | |
 | `owner_id` | `uuid` FK → users.id NOT NULL | |
-| `title` | `text` NOT NULL | |
-| `format_version` | `int` NOT NULL DEFAULT 1 | См. §7 о версионировании. |
+| `title` | `varchar(255)` NOT NULL | |
+| `format_version` | `int` NOT NULL DEFAULT 1, CHECK `format_version >= 1` | См. §7 о версионировании. |
 | `cells` | `jsonb` NOT NULL DEFAULT '[]' | Массив ячеек, см. §7.2. |
 | `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
-| `updated_at` | `timestamptz` NOT NULL DEFAULT now() | Обновляется на каждом save. Равен `max(cells[].updatedAt, notebook.updated_at)`. |
+| `updated_at` | `timestamptz` NOT NULL DEFAULT now() | Серверное время последнего сохранения notebook с учётом client cell timestamps. Используется для сортировки списка notebooks. |
 | `deleted_at` | `timestamptz` NULL | Soft-delete. |
 
 **Индексы:**
-- `(owner_id, updated_at DESC)` — список ноутбуков пользователя.
-- Partial index `(owner_id) WHERE deleted_at IS NULL`.
+- Partial index `(owner_id, updated_at DESC) WHERE deleted_at IS NULL` — список активных notebooks пользователя, отсортированный по времени обновления.
 
 ---
 
@@ -261,7 +260,7 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 {
   "accessToken": "eyJhbGciOi...",
   "refreshToken": "r7K3...base64url...",
-  "user": { "id": "uuid", "email": "user@example.com", "displayName": null }
+  "user": { "id": "uuid", "email": "user@example.com", "displayName": null, "roles": [] }
 }
 ```
 
@@ -352,9 +351,13 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
 можно передать `X-User-Id: <uuid>`. В real-auth режиме будет
 `Authorization: Bearer <access>`.
 
-В placeholder-режиме валидный `X-User-Id`, которого ещё нет в `app.users`,
-создаёт dev-only placeholder user row. Это нужно только для локальной разработки,
-чтобы `notebooks.owner_id` не падал на FK при создании notebook.
+Placeholder-режим включён только для `dev`/`test` окружений. В `production` и
+`staging` backend не принимает `X-User-Id` как источник identity и возвращает
+ошибку до появления real-auth реализации.
+
+В `dev`/`test` валидный `X-User-Id`, которого ещё нет в `app.users`, создаёт
+dev-only placeholder user row. Это нужно только для локальной разработки, чтобы
+`notebooks.owner_id` не падал на FK при создании notebook.
 
 **Response 200:**
 ```json
@@ -479,14 +482,31 @@ Base prefix: `/api/v1`. Все endpoint’ы возвращают JSON. Error en
      - Если ячейка есть только в server → взять server.
      - Если в обоих → взять ту, у которой `updatedAt` больше (LWW).
 5. Порядок ячеек — берём с client (last writer определяет порядок). Новые ячейки из server (которых нет в client) — добавляются в конец.
-6. `notebooks.updated_at = max(merged_cells[].updatedAt)`.
+6. Сервер пересчитывает top-level `notebooks.updated_at` отдельно от cell-level timestamps:
+   - если cells пустой массив — `notebooks.updated_at = server save time`;
+   - если cells есть — сервер берёт `max(merged_cells[].updatedAt)`, но ограничивает будущее значение через `server save time + MAX_FUTURE_SKEW_MS`;
+   - итоговое значение не может быть меньше `server save time`.
 
-> **О времени:** оба времени (`cell.updatedAt`, `deletedAt`) приходят с клиента. Сервер их не переопределяет. Clock skew — ограничение §8.2.
+Формула:
+
+```text
+notebooks.updated_at =
+  max(server_save_time, min(max(merged_cells[].updatedAt), server_save_time + 5000ms))
+```
+
+> **О времени:** `cell.updatedAt` и `deletedAt` приходят с клиента. Сервер НЕ
+> переписывает `cell.updatedAt` внутри JSONB cells. Ограничение применяется
+> только к top-level `notebooks.updated_at`, чтобы клиент с часами в будущем не
+> ломал сортировку списка notebooks.
 
 ### 8.2. Ограничения этой стратегии
 
 - **Edit war внутри одной ячейки** — изменения с «проигравшего» устройства теряются. Это врождённое ограничение LWW.
-- **Clock skew** — время берём с клиента. Если часы расходятся на минуты — LWW может выбрать «не ту» версию. Принимаем этот риск.
+- **Clock skew** — LWW внутри cells всё ещё зависит от клиентского `cell.updatedAt`.
+  Если часы клиента сильно расходятся, merge может выбрать «не ту» cell-версию.
+  Сервер не переписывает `cell.updatedAt`, чтобы не ломать offline-first sync.
+  Но top-level `notebooks.updated_at` ограничивается серверным cap, чтобы
+  испорченное клиентское время не ломало сортировку notebooks.
 - **Full CRDT** (например Yjs) — в backlog. Переход потребует перехода на другую модель хранения.
 
 ### 8.3. Удаление ячеек (request-only tombstones)

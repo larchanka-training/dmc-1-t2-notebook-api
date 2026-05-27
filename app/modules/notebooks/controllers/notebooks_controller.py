@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
+from app.core.errors import ApiErrorResponse
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.schemas.user_schemas import CurrentUser
 from app.modules.notebooks.repositories.notebook_repository import NotebookRepository
@@ -30,7 +31,11 @@ def get_notebook_service(db: Session = Depends(get_db)) -> NotebookService:
         200: {
             "model": NotebookResponse,
             "description": "Notebook already existed for this owner",
-        }
+        },
+        409: {
+            "model": ApiErrorResponse,
+            "description": "Notebook id already exists with different content",
+        },
     },
     summary="Create notebook",
 )

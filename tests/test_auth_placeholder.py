@@ -1,5 +1,6 @@
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
@@ -38,3 +39,17 @@ def test_get_me_rejects_invalid_x_user_id(client: TestClient) -> None:
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_placeholder_auth_rejected_in_production(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "app_env", "production")
+
+    response = client.get(
+        f"{settings.api_prefix}/auth/me",
+        headers={"X-User-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 501
+    assert response.json()["error"]["code"] == "AUTH_NOT_IMPLEMENTED"

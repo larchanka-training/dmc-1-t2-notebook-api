@@ -2,7 +2,8 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Uuid
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -18,7 +19,7 @@ class Notebook(Base):
     )
     owner_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True).with_variant(PgUUID(as_uuid=True), "postgresql"),
-        ForeignKey("app.users.id"),
+        ForeignKey("app.users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -31,6 +32,12 @@ class Notebook(Base):
         nullable=False,
         default=list,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

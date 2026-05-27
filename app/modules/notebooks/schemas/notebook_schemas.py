@@ -7,6 +7,8 @@ from pydantic.alias_generators import to_camel
 CURRENT_FORMAT_VERSION = 1
 ALLOWED_SORTS = {"updatedAt", "createdAt", "title"}
 ALLOWED_ORDERS = {"asc", "desc"}
+MAX_CELL_CONTENT_BYTES = 256 * 1024
+MAX_CELLS_PER_NOTEBOOK = 500
 
 
 class CellSchema(BaseModel):
@@ -14,7 +16,7 @@ class CellSchema(BaseModel):
 
     id: UUID
     kind: Literal["code", "markdown"]
-    content: str = ""
+    content: str = Field(default="", max_length=MAX_CELL_CONTENT_BYTES)
     updated_at: int = Field(..., ge=0)
 
 
@@ -30,7 +32,9 @@ class NotebookBase(BaseModel):
 
     title: str = Field(..., min_length=1, max_length=255)
     format_version: int = Field(default=CURRENT_FORMAT_VERSION, ge=1)
-    cells: list[CellSchema] = Field(default_factory=list)
+    cells: list[CellSchema] = Field(
+        default_factory=list, max_length=MAX_CELLS_PER_NOTEBOOK
+    )
 
 
 class NotebookCreate(NotebookBase):

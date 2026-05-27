@@ -15,10 +15,7 @@ def merge_cells(
 ) -> list[dict[str, Any]]:
     server_items = [_normalize_cell(cell) for cell in server_cells]
     client_items = [_normalize_cell(cell) for cell in client_cells]
-    deleted_by_id = {
-        str(item["id"]): int(item["deletedAt"])
-        for item in deleted_cells
-    }
+    deleted_by_id = {str(item["id"]): int(item["deletedAt"]) for item in deleted_cells}
 
     server_by_id = {cell["id"]: cell for cell in server_items}
     client_by_id = {cell["id"]: cell for cell in client_items}
@@ -41,7 +38,7 @@ def merge_cells(
         elif server_cell and client_cell:
             merged_by_id[cell_id] = (
                 client_cell
-                if int(client_cell["updatedAt"]) >= int(server_cell["updatedAt"])
+                if int(client_cell["updatedAt"]) > int(server_cell["updatedAt"])
                 else server_cell
             )
 

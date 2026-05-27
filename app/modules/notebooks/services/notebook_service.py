@@ -58,6 +58,13 @@ def unsupported_format_version() -> HTTPException:
     )
 
 
+def notebook_conflict(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"code": "NOTEBOOK_CONFLICT", "message": message},
+    )
+
+
 class NotebookService:
     def __init__(self, repository: NotebookRepository) -> None:
         self.repository = repository
@@ -74,6 +81,11 @@ class NotebookService:
                 raise forbidden()
             if existing.deleted_at is not None:
                 raise notebook_not_found()
+            if not self._matches_create_payload(existing, payload):
+                raise notebook_conflict(
+                    "Notebook with id already exists with different content"
+                )
+
             return self.to_response(existing), False
 
         self._validate_format_version(payload.format_version)
@@ -90,7 +102,7 @@ class NotebookService:
             updated_at=updated_at,
             deleted_at=None,
         )
-        return self.to_response(self.repository.create(notebook)), True
+        return self.to_response(self.repository.save(notebook)), True
 
     def list(
         self,
@@ -185,6 +197,15 @@ class NotebookService:
         return [
             tombstone.model_dump(by_alias=True, mode="json") for tombstone in tombstones
         ]
+
+    def _matches_create_payload(
+        self, notebook: Notebook, payload: NotebookCreate
+    ) -> bool:
+        return (
+            notebook.title == payload.title
+            and notebook.format_version == payload.format_version
+            and (notebook.cells or []) == self._cells_to_storage(payload.cells)
+        )
 
     def to_response(self, notebook: Notebook) -> NotebookResponse:
         return NotebookResponse(

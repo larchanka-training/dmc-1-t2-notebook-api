@@ -3,6 +3,7 @@ from uuid import UUID
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.db import get_db
 from app.modules.auth.repositories.user_repository import UserRepository
 from app.modules.auth.schemas.user_schemas import CurrentUser
@@ -19,6 +20,15 @@ def get_current_user(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     db: Session = Depends(get_db),
 ) -> CurrentUser:
+    # Placeholder auth is dev-only until real OTP/JWT auth lands.
+    if settings.app_env not in {"dev", "test", "local"}:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail={
+                "code": "AUTH_NOT_IMPLEMENTED",
+                "message": "Placeholder authentication is disabled outside dev/test environments.",
+            },
+        )
     if x_user_id is None:
         UserRepository(db).get_or_create_placeholder_user(
             DEV_USER.id,

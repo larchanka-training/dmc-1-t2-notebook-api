@@ -38,7 +38,7 @@ app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description=(
-        "## MSD FastAPI Template\n\n"
+        "## JS Notebook API\n\n"
         "Backend API for the JS Notebook project. Built on a multi-module "
         "architecture: each domain module owns its `controllers`, "
         "`services` and `schemas`.\n\n"

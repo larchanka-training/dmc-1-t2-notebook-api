@@ -30,6 +30,5 @@ class UserRepository:
             created_at=datetime.now(UTC),
         )
         self.db.add(user)
-        self.db.commit()
-        self.db.refresh(user)
+        self.db.flush()
         return user

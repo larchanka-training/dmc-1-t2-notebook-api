@@ -1,10 +1,48 @@
 {
   "components": {
     "schemas": {
+      "ApiError": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "fields": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Fields",
+            "type": "object"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ApiError",
+        "type": "object"
+      },
+      "ApiErrorResponse": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ApiError"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ApiErrorResponse",
+        "type": "object"
+      },
       "CellSchema": {
         "properties": {
           "content": {
             "default": "",
+            "maxLength": 262144,
             "title": "Content",
             "type": "string"
           },
@@ -106,6 +144,7 @@
         "type": "object"
       },
       "CurrentUser": {
+        "description": "Represents the current authenticated user.",
         "properties": {
           "displayName": {
             "anyOf": [
@@ -230,6 +269,7 @@
             "items": {
               "$ref": "#/components/schemas/CellSchema"
             },
+            "maxItems": 500,
             "title": "Cells",
             "type": "array"
           },
@@ -340,6 +380,7 @@
             "items": {
               "$ref": "#/components/schemas/CellSchema"
             },
+            "maxItems": 500,
             "title": "Cells",
             "type": "array"
           },
@@ -375,6 +416,7 @@
             "items": {
               "$ref": "#/components/schemas/CellSchema"
             },
+            "maxItems": 500,
             "title": "Cells",
             "type": "array"
           },
@@ -466,7 +508,7 @@
       "name": "MSD Course",
       "url": "https://github.com/larchanka-training/dmc-1-t2-notebook-api"
     },
-    "description": "## MSD FastAPI Template\n\nBackend API for the JS Notebook project. Built on a multi-module architecture: each domain module owns its `controllers`, `services` and `schemas`.\n\n**Documentation:**\n- Swagger UI: [`/docs`](/docs)\n- ReDoc: [`/redoc`](/redoc)\n- OpenAPI schema: [`/openapi.json`](/openapi.json)\n",
+    "description": "## JS Notebook API\n\nBackend API for the JS Notebook project. Built on a multi-module architecture: each domain module owns its `controllers`, `services` and `schemas`.\n\n**Documentation:**\n- Swagger UI: [`/docs`](/docs)\n- ReDoc: [`/redoc`](/redoc)\n- OpenAPI schema: [`/openapi.json`](/openapi.json)\n",
     "license": {
       "name": "MIT"
     },
@@ -775,6 +817,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Notebook id already exists with different content"
           },
           "422": {
             "content": {

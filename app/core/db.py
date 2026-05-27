@@ -34,10 +34,16 @@ def get_session_factory() -> sessionmaker[Session]:
 
 
 def get_db() -> Generator[Session, None, None]:
-    """FastAPI dependency yielding a SQLAlchemy session."""
+    """FastAPI dependency yielding a SQLAlchemy session.
+    Транзакционная граница = HTTP-запрос:
+        - успех в роуте → commit
+        - исключение    → rollback
+        - всегда        → close
+    """
     session = get_session_factory()()
     try:
         yield session
+        session.commit()
     except Exception:
         session.rollback()
         raise

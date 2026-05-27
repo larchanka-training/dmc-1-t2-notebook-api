@@ -17,12 +17,6 @@ class NotebookRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def create(self, notebook: Notebook) -> Notebook:
-        self.db.add(notebook)
-        self.db.commit()
-        self.db.refresh(notebook)
-        return notebook
-
     def get_by_id(self, notebook_id: UUID) -> Notebook | None:
         statement = select(Notebook).where(Notebook.id == notebook_id)
         return self.db.execute(statement).scalar_one_or_none()
@@ -54,13 +48,11 @@ class NotebookRepository:
 
     def save(self, notebook: Notebook) -> Notebook:
         self.db.add(notebook)
-        self.db.commit()
-        self.db.refresh(notebook)
+        self.db.flush()  # пушим SQL в БД, но без commit
         return notebook
 
     def soft_delete(self, notebook: Notebook, deleted_at: datetime) -> Notebook:
         notebook.deleted_at = deleted_at
         self.db.add(notebook)
-        self.db.commit()
-        self.db.refresh(notebook)
+        self.db.flush()
         return notebook

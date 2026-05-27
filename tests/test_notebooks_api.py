@@ -62,7 +62,25 @@ def test_create_notebook_with_client_id_is_idempotent(client: TestClient) -> Non
     assert second.json()["id"] == notebook_id
 
 
-def test_create_existing_id_for_another_owner_returns_forbidden(client: TestClient) -> None:
+def test_create_existing_id_with_different_payload_returns_conflict(
+    client: TestClient,
+) -> None:
+    notebook_id = str(uuid4())
+    first_payload = _payload(notebook_id)
+    second_payload = _payload(notebook_id)
+    second_payload["title"] = "Different title"
+
+    first = client.post(f"{settings.api_prefix}/notebooks", json=first_payload)
+    second = client.post(f"{settings.api_prefix}/notebooks", json=second_payload)
+
+    assert first.status_code == 201
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "NOTEBOOK_CONFLICT"
+
+
+def test_create_existing_id_for_another_owner_returns_forbidden(
+    client: TestClient,
+) -> None:
     notebook_id = str(uuid4())
     client.post(f"{settings.api_prefix}/notebooks", json=_payload(notebook_id))
 
@@ -76,7 +94,9 @@ def test_create_existing_id_for_another_owner_returns_forbidden(client: TestClie
     assert response.json()["error"]["code"] == "FORBIDDEN"
 
 
-def test_create_with_new_x_user_id_creates_placeholder_owner(client: TestClient) -> None:
+def test_create_with_new_x_user_id_creates_placeholder_owner(
+    client: TestClient,
+) -> None:
     user_id = str(uuid4())
 
     response = client.post(
@@ -217,3 +237,16 @@ def test_invalid_cell_kind_uses_error_envelope(client: TestClient) -> None:
     body = response.json()
     assert body["error"]["code"] == "VALIDATION_ERROR"
     assert "cells[0].kind" in body["error"]["fields"]
+
+
+def test_create_rejects_too_many_cells(client: TestClient) -> None:
+    payload = {
+        "title": "huge",
+        "formatVersion": 1,
+        "cells": [
+            {"id": str(uuid4()), "kind": "code", "content": "", "updatedAt": 1}
+            for _ in range(501)
+        ],
+    }
+    response = client.post("/api/v1/notebooks", json=payload)
+    assert response.status_code == 422

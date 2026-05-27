@@ -80,3 +80,11 @@ def install_error_handlers(app: FastAPI) -> None:
                 fields = {str(key): str(value) for key, value in raw_fields.items()}
 
         return error_response(exc.status_code, code, message, fields)
+
+    @app.exception_handler(Exception)
+    async def unhandled(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            500,
+            "INTERNAL_SERVER_ERROR",
+            "Internal server error",
+        )
