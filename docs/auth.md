@@ -604,6 +604,18 @@ while notebook.format_version < CURRENT_FORMAT_VERSION:
 - **Sessions retention** — при logout ставится `revoked_at`. Cron удаляет записи старше **90 дней** после revocation/expiration. Объём аудита ограничен.
 - **OTP cleanup** — cron удаляет `otps WHERE expires_at < now() - interval '1 day'`.
 
+### Изоляция исполнения пользовательского JS (frontend-слой)
+
+Исполнение кода ячеек изолировано на фронте (Web Worker + QuickJS sandbox).
+Этот слой защиты frontend-специфичен и не затрагивает backend auth-контракт
+(JWT / OTP / sessions); описан в [`ui/docs/auth.md`][ui-auth] §4.1 (изоляция JS)
+и §4.3 (CSP + Cross-origin isolation, COOP/COEP).
+
+Заголовки `Cross-Origin-Opener-Policy` / `Cross-Origin-Embedder-Policy`
+(нужны для `SharedArrayBuffer`, на котором держится прерывание зависшего
+VM) отдаёт nginx (`proxy/`), не backend-приложение. Изменения этого слоя
+синхронизируются с [`ui/docs/auth.md`][ui-auth] по правилу AGENTS.md §10.
+
 ---
 
 ## 12. Переменные окружения
