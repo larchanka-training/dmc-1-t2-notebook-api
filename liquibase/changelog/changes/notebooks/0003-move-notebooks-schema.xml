@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <changeSet id="notebooks-0003-move-notebooks-schema" author="msd">
+        <comment>
+            TARDIS-31: split monolithic 'app' schema by domain.
+            Drop the cross-domain FK on owner_id (notebooks domain is
+            slated to move to NoSQL — see api/docs/domain-boundaries.md),
+            then move app.notebooks into its own 'notebooks' schema.
+            Pure DDL — no data is rewritten.
+
+            The FK was created inline in 0002 without an explicit name,
+            so PostgreSQL auto-generated 'notebooks_owner_id_fkey'.
+            DROP ... IF EXISTS is defensive: if anyone dropped it
+            manually earlier, this still succeeds.
+        </comment>
+        <sql>
+            ALTER TABLE app.notebooks
+                DROP CONSTRAINT IF EXISTS notebooks_owner_id_fkey;
+            CREATE SCHEMA IF NOT EXISTS notebooks;
+            ALTER TABLE app.notebooks SET SCHEMA notebooks;
+        </sql>
+
+        <rollback>
+            <!--
+                Reverse direction: move the table back to 'app' and drop
+                the 'notebooks' schema. The FK is intentionally NOT
+                restored here: rollbacks run in reverse changelog order,
+                so when this rollback executes 'users.users' still exists
+                in the 'users' schema (the users rollback hasn't run yet)
+                and an ADD CONSTRAINT against 'app.users(id)' would fail.
+                These structural migrations are not meant to be rolled
+                back routinely — restore the FK manually if you really
+                need to revert all the way to the 0002 baseline.
+            -->
+            <sql>
+                ALTER TABLE notebooks.notebooks SET SCHEMA app;
+                DROP SCHEMA IF EXISTS notebooks;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

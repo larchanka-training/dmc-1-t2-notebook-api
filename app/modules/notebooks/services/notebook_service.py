@@ -23,7 +23,7 @@ from fastapi import HTTPException, status
 from app.core.time import datetime_to_unix_ms, unix_ms_to_datetime
 from app.modules.auth.schemas.user_schemas import CurrentUser
 from app.modules.notebooks.models.notebook import Notebook
-from app.modules.notebooks.repositories.notebook_repository import NotebookRepository
+from app.modules.notebooks.repositories.protocol import NotebookRepositoryProtocol
 from app.modules.notebooks.schemas.notebook_schemas import (
     ALLOWED_ORDERS,
     ALLOWED_SORTS,
@@ -109,11 +109,13 @@ class NotebookService:
     проникают ни ``Session``, ни ``Request`` — только DTO.
     """
 
-    def __init__(self, repository: NotebookRepository) -> None:
+    def __init__(self, repository: NotebookRepositoryProtocol) -> None:
         """Bind the service to a notebook repository.
 
         Args:
-            repository: Уже инициализированный :class:`NotebookRepository`.
+            repository: Любая реализация :class:`NotebookRepositoryProtocol`
+                (на MVP это SQL-репозиторий; будущая NoSQL-реализация
+                подмешивается через DI без правок в сервисе).
         """
         self.repository = repository
 

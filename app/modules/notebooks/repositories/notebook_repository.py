@@ -24,7 +24,7 @@ SORT_COLUMNS = {
 
 
 class NotebookRepository:
-    """Repository for ``app.notebooks`` rows.
+    """Repository for ``notebooks.notebooks`` rows.
 
     Принимает request-scoped ``Session`` и оперирует через неё. Все
     публичные методы — это «единицы работы»: один вызов = одно

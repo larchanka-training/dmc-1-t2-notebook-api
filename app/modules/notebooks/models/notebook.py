@@ -1,4 +1,4 @@
-"""ORM model for the ``app.notebooks`` table.
+"""ORM model for the ``notebooks.notebooks`` table.
 
 Содержит метаданные ноутбука и его ячейки в JSONB-поле ``cells``.
 Ячейки умышленно денормализованы (один документ — один ноутбук): это
@@ -8,7 +8,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Uuid
+from sqlalchemy import JSON, DateTime, Integer, String, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -17,7 +17,7 @@ from app.core.db import Base
 
 
 class Notebook(Base):
-    """SQLAlchemy mapping for ``app.notebooks``.
+    """SQLAlchemy mapping for ``notebooks.notebooks``.
 
     Ноутбук принадлежит одному пользователю (``owner_id``) и удаляется
     «мягко» через ``deleted_at`` (NULL = активен). ``cells`` хранит
@@ -27,7 +27,10 @@ class Notebook(Base):
 
     Attributes:
         id: UUID-ключ. Генерируется на клиенте (offline-first).
-        owner_id: FK на ``app.users.id``, ``ON DELETE CASCADE``.
+        owner_id: UUID владельца (``users.users.id``). DB-уровневого FK
+            намеренно нет — домен notebooks готовится к переезду в NoSQL,
+            где cross-DB FK не существует. Целостность по owner_id
+            обеспечивает приложение (см. api/docs/domain-boundaries.md §4).
         title: До 255 символов (валидация и в схеме, и в БД).
         format_version: Версия формата документа; растёт с миграциями.
         cells: Список ячеек в API-формате (camelCase).
@@ -37,7 +40,7 @@ class Notebook(Base):
     """
 
     __tablename__ = "notebooks"
-    __table_args__ = {"schema": "app"}
+    __table_args__ = {"schema": "notebooks"}
 
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True).with_variant(PgUUID(as_uuid=True), "postgresql"),
@@ -45,7 +48,6 @@ class Notebook(Base):
     )
     owner_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True).with_variant(PgUUID(as_uuid=True), "postgresql"),
-        ForeignKey("app.users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )

@@ -6,11 +6,20 @@
                             http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
 
     <!--
-        Master changelog. Each domain module adds its own changeset file under
-        changes/ and includes it here in order.
+        Master changelog.
+
+        Historical changesets stay flat at the changes/ root and are NEVER
+        edited or moved (Liquibase tracks them by checksum + filename).
+        New domain-owned changesets live under changes/<domain>/ and are
+        wired in via per-domain child changelogs. See
+        api/docs/domain-boundaries.md §7.
+
+        Include order matters: historical baseline → per-domain children.
     -->
 
     <include file="changes/0001-initial.xml" relativeToChangelogFile="true"/>
     <include file="changes/0002-users-notebooks.xml" relativeToChangelogFile="true"/>
+    <include file="changes/users/changelog-users.xml" relativeToChangelogFile="true"/>
+    <include file="changes/notebooks/changelog-notebooks.xml" relativeToChangelogFile="true"/>
 
 </databaseChangeLog>

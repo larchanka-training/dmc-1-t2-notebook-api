@@ -1,4 +1,4 @@
-"""ORM model for the ``app.users`` table.
+"""ORM model for the ``users.users`` table.
 
 Минимальный пользователь: UUID, email и опциональное отображаемое имя.
 До настоящего OTP/JWT мы хранили только то, без чего не работают
@@ -16,7 +16,7 @@ from app.core.db import Base
 
 
 class User(Base):
-    """SQLAlchemy mapping for ``app.users``.
+    """SQLAlchemy mapping for ``users.users``.
 
     «Тонкая» модель: только то, что нужно для placeholder-auth и для
     связи 1:N с notebook'ами. ``id`` — UUID (генерируется на стороне
@@ -28,7 +28,7 @@ class User(Base):
     """
 
     __tablename__ = "users"
-    __table_args__ = {"schema": "app"}
+    __table_args__ = {"schema": "users"}
 
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True).with_variant(PgUUID(as_uuid=True), "postgresql"),
