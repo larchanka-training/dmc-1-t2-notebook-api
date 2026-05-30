@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <!--
+        Users domain changelog. Owned by the auth/identity module.
+        Historical baseline (0001-initial.xml, 0002-users-notebooks.xml)
+        lives in changes/ root; do not re-include it here.
+
+        Add new identity-related changesets in this folder going forward.
+    -->
+
+    <include file="0003-move-users-schema.xml" relativeToChangelogFile="true"/>
+
+</databaseChangeLog>

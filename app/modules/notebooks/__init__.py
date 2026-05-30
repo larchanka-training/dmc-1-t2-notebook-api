@@ -3,7 +3,7 @@
 Главный домен сервиса: CRUD над «ноутбуками» (заметками) + offline-first
 синхронизация ячеек. Внутри классический срез:
 
-* ``models`` — SQLAlchemy ORM для таблицы ``app.notebooks``;
+* ``models`` — SQLAlchemy ORM для таблицы ``notebooks.notebooks``;
 * ``schemas`` — Pydantic-схемы запросов/ответов и константы лимитов;
 * ``repositories`` — DAL поверх ``Session``;
 * ``services`` — бизнес-логика (включая merge ячеек по LWW);

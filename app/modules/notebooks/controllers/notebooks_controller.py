@@ -8,13 +8,11 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response, status
-from sqlalchemy.orm import Session
 
-from app.core.db import get_db
 from app.core.errors import ApiErrorResponse
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.schemas.user_schemas import CurrentUser
-from app.modules.notebooks.repositories.notebook_repository import NotebookRepository
+from app.modules.notebooks.dependencies import get_notebook_service
 from app.modules.notebooks.schemas.notebook_schemas import (
     NotebookCreate,
     NotebookListResponse,
@@ -24,23 +22,6 @@ from app.modules.notebooks.schemas.notebook_schemas import (
 from app.modules.notebooks.services.notebook_service import NotebookService
 
 router = APIRouter(prefix="/notebooks", tags=["Notebooks"])
-
-
-def get_notebook_service(db: Session = Depends(get_db)) -> NotebookService:
-    """Provide a request-scoped :class:`NotebookService`.
-
-    Сборка цепочки ``Session → Repository → Service``. Так каждый
-    запрос получает свой инстанс сервиса, привязанный к своей сессии,
-    и можно подменять зависимости в тестах через
-    ``app.dependency_overrides``.
-
-    Args:
-        db: Сессия из :func:`get_db`.
-
-    Returns:
-        Готовый к работе :class:`NotebookService`.
-    """
-    return NotebookService(NotebookRepository(db))
 
 
 @router.post(

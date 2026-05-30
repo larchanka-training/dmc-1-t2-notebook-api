@@ -27,8 +27,14 @@ def db_session() -> Generator[Session, None, None]:
     )
 
     @event.listens_for(engine, "connect")
-    def attach_app_schema(dbapi_connection, connection_record) -> None:  # type: ignore[no-untyped-def]
-        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS app")
+    def attach_domain_schemas(dbapi_connection, connection_record) -> None:  # type: ignore[no-untyped-def]
+        # SQLite не знает PostgreSQL-schemas. Эмулируем их через
+        # ATTACH DATABASE: каждое имя становится псевдо-schema, и
+        # SQLAlchemy выдаёт DDL вида `CREATE TABLE users.users (...)`
+        # против присоединённой базы. Имена должны совпадать с
+        # __table_args__={"schema": ...} в ORM-моделях.
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS users")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS notebooks")
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     Base.metadata.create_all(bind=engine)

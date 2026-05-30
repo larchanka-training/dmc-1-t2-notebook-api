@@ -15,7 +15,7 @@ from app.modules.auth.models.user import User
 
 
 class UserRepository:
-    """Repository for ``app.users`` rows.
+    """Repository for ``users.users`` rows.
 
     Делегирует все DB-операции внешней ``Session`` (``self.db``).
     Конкретно из-за этой делегации мы можем держать одну транзакцию
