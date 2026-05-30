@@ -15,20 +15,19 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from app.modules.notebooks.models.notebook import Notebook
+from app.modules.notebooks.entities import NotebookEntity
 
 
 class NotebookRepositoryProtocol(Protocol):
     """Methods every Notebook repository implementation must provide.
 
-    На MVP контракт возвращает ORM-объект :class:`Notebook` напрямую.
-    Когда дойдём до NoSQL-реализации — стоит ввести «доменную сущность»
-    (обычный :class:`dataclasses.dataclass` без SQLAlchemy), и протокол
-    начнёт работать с ней; сервис от этого не сломается, так как уже
-    не знает про ORM напрямую.
+    Контракт возвращает :class:`NotebookEntity`, а не ORM-модель. Поэтому
+    сервис не зависит от SQLAlchemy, а конкретный репозиторий сам решает,
+    как материализовать entity в SQL row, Mongo document или другое
+    storage-представление.
     """
 
-    def get_by_id(self, notebook_id: UUID) -> Notebook | None:
+    def get_by_id(self, notebook_id: UUID) -> NotebookEntity | None:
         """Fetch a notebook by primary key (including soft-deleted)."""
         ...
 
@@ -39,14 +38,16 @@ class NotebookRepositoryProtocol(Protocol):
         offset: int,
         sort: str,
         order: str,
-    ) -> tuple[list[Notebook], int]:
+    ) -> tuple[list[NotebookEntity], int]:
         """Return a page of active notebooks for ``owner_id`` plus total count."""
         ...
 
-    def save(self, notebook: Notebook) -> Notebook:
+    def save(self, notebook: NotebookEntity) -> NotebookEntity:
         """Persist a new or modified notebook within the open transaction."""
         ...
 
-    def soft_delete(self, notebook: Notebook, deleted_at: datetime) -> Notebook:
+    def soft_delete(
+        self, notebook: NotebookEntity, deleted_at: datetime
+    ) -> NotebookEntity:
         """Mark a notebook as deleted by setting ``deleted_at``."""
         ...

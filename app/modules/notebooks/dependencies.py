@@ -6,10 +6,9 @@
 :class:`Session`, :class:`NotebookRepository` или другие
 storage-specific детали (см. ``api/docs/domain-boundaries.md`` §5–6).
 
-Когда notebooks-домен переедет на NoSQL, замена сводится к правке
-этой одной функции: новая реализация репозитория передаётся в тот
-же :class:`NotebookService`, который продолжает зависеть только от
-:class:`NotebookRepositoryProtocol`.
+Когда notebooks-домен переедет на NoSQL, DI выберет другую реализацию
+репозитория. :class:`NotebookService` продолжит работать через
+storage-neutral :class:`NotebookEntity` и :class:`NotebookRepositoryProtocol`.
 """
 
 from fastapi import Depends

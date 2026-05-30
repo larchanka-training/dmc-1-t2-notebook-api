@@ -12,6 +12,7 @@ from uuid import UUID
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
+from app.modules.notebooks.entities import NotebookEntity
 from app.modules.notebooks.models.notebook import Notebook
 
 #: Карта «имя сортировки из API → колонка в ORM». Используется для
@@ -39,7 +40,7 @@ class NotebookRepository:
         """
         self.db = db
 
-    def get_by_id(self, notebook_id: UUID) -> Notebook | None:
+    def get_by_id(self, notebook_id: UUID) -> NotebookEntity | None:
         """Fetch a notebook by primary key (including soft-deleted ones).
 
         Сервис сам решает, считать ли запись «живой» по ``deleted_at``;
@@ -50,10 +51,11 @@ class NotebookRepository:
             notebook_id: UUID ноутбука.
 
         Returns:
-            ``Notebook`` или ``None``.
+            ``NotebookEntity`` или ``None``.
         """
         statement = select(Notebook).where(Notebook.id == notebook_id)
-        return self.db.execute(statement).scalar_one_or_none()
+        row = self.db.execute(statement).scalar_one_or_none()
+        return self._to_entity(row) if row is not None else None
 
     def list_by_owner(
         self,
@@ -62,7 +64,7 @@ class NotebookRepository:
         offset: int,
         sort: str,
         order: str,
-    ) -> tuple[list[Notebook], int]:
+    ) -> tuple[list[NotebookEntity], int]:
         """List active notebooks for an owner with pagination and sorting.
 
         Возвращает «страницу» ноутбуков и общее число записей. Жёстко
@@ -94,28 +96,35 @@ class NotebookRepository:
             .limit(limit)
             .offset(offset)
         )
-        items = list(self.db.execute(statement).scalars().all())
+        items = [self._to_entity(row) for row in self.db.execute(statement).scalars()]
         return items, total
 
-    def save(self, notebook: Notebook) -> Notebook:
+    def save(self, notebook: NotebookEntity) -> NotebookEntity:
         """Persist a new or modified notebook within the open transaction.
 
-        ``add`` + ``flush``: SQL отправляется в БД, но транзакция не
-        закрывается — её закроет :func:`get_db` после успешного роута.
-        Используется и для INSERT, и для UPDATE: SQLAlchemy сам решает,
-        что это, по состоянию объекта.
+        SQLAlchemy-материализация спрятана внутри репозитория: сервис
+        передаёт storage-neutral entity, а репозиторий создаёт или
+        обновляет ORM row.
 
         Args:
-            notebook: ORM-объект для сохранения.
+            notebook: Entity для сохранения.
 
         Returns:
-            Тот же ``notebook`` (для удобной chain-нотации в сервисе).
+            Сохранённая entity.
         """
-        self.db.add(notebook)
-        self.db.flush()  # пушим SQL в БД, но без commit
-        return notebook
+        row = self.db.get(Notebook, notebook.id)
+        if row is None:
+            row = self._to_model(notebook)
+        else:
+            self._apply_entity(row, notebook)
 
-    def soft_delete(self, notebook: Notebook, deleted_at: datetime) -> Notebook:
+        self.db.add(row)
+        self.db.flush()  # пушим SQL в БД, но без commit
+        return self._to_entity(row)
+
+    def soft_delete(
+        self, notebook: NotebookEntity, deleted_at: datetime
+    ) -> NotebookEntity:
         """Mark a notebook as deleted by setting ``deleted_at``.
 
         Soft-delete — это не ``DELETE``, а ``UPDATE``. Запись остаётся
@@ -127,9 +136,52 @@ class NotebookRepository:
             deleted_at: Метка времени удаления (обычно ``now()``).
 
         Returns:
-            Тот же ``notebook`` с проставленным ``deleted_at``.
+            Entity с проставленным ``deleted_at``.
         """
-        notebook.deleted_at = deleted_at
-        self.db.add(notebook)
-        self.db.flush()
-        return notebook
+        deleted = NotebookEntity(
+            id=notebook.id,
+            owner_id=notebook.owner_id,
+            title=notebook.title,
+            format_version=notebook.format_version,
+            cells=notebook.cells,
+            created_at=notebook.created_at,
+            updated_at=notebook.updated_at,
+            deleted_at=deleted_at,
+        )
+        return self.save(deleted)
+
+    def _to_entity(self, row: Notebook) -> NotebookEntity:
+        """Map a SQLAlchemy row to the storage-neutral domain entity."""
+        return NotebookEntity(
+            id=row.id,
+            owner_id=row.owner_id,
+            title=row.title,
+            format_version=row.format_version,
+            cells=row.cells or [],
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            deleted_at=row.deleted_at,
+        )
+
+    def _to_model(self, entity: NotebookEntity) -> Notebook:
+        """Map a domain entity to a new SQLAlchemy row."""
+        return Notebook(
+            id=entity.id,
+            owner_id=entity.owner_id,
+            title=entity.title,
+            format_version=entity.format_version,
+            cells=entity.cells,
+            created_at=entity.created_at,
+            updated_at=entity.updated_at,
+            deleted_at=entity.deleted_at,
+        )
+
+    def _apply_entity(self, row: Notebook, entity: NotebookEntity) -> None:
+        """Apply domain entity state to an existing SQLAlchemy row."""
+        row.owner_id = entity.owner_id
+        row.title = entity.title
+        row.format_version = entity.format_version
+        row.cells = entity.cells
+        row.created_at = entity.created_at
+        row.updated_at = entity.updated_at
+        row.deleted_at = entity.deleted_at

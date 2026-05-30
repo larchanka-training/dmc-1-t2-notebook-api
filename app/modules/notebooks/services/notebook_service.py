@@ -22,7 +22,7 @@ from fastapi import HTTPException, status
 
 from app.core.time import datetime_to_unix_ms, unix_ms_to_datetime
 from app.modules.auth.schemas.user_schemas import CurrentUser
-from app.modules.notebooks.models.notebook import Notebook
+from app.modules.notebooks.entities import NotebookEntity
 from app.modules.notebooks.repositories.protocol import NotebookRepositoryProtocol
 from app.modules.notebooks.schemas.notebook_schemas import (
     ALLOWED_ORDERS,
@@ -105,8 +105,9 @@ class NotebookService:
     """Use-cases for notebook CRUD + offline sync (PATCH merge).
 
     Слой бизнес-логики: знает про :class:`CurrentUser`, валидирует
-    инварианты домена, делегирует БД-операции репозиторию. Сюда не
-    проникают ни ``Session``, ни ``Request`` — только DTO.
+    инварианты домена, делегирует persistence-операции репозиторию.
+    Сюда не проникают ни ``Session``, ни ``Request``, ни ORM-модели —
+    только DTO и storage-neutral entities.
     """
 
     def __init__(self, repository: NotebookRepositoryProtocol) -> None:
@@ -164,7 +165,7 @@ class NotebookService:
         now = datetime.now(UTC)
         cells = self._cells_to_storage(payload.cells)
         updated_at = self._compute_updated_at(cells, now)
-        notebook = Notebook(
+        notebook = NotebookEntity(
             id=notebook_id,
             owner_id=current_user.id,
             title=payload.title,
@@ -294,14 +295,14 @@ class NotebookService:
         self._ensure_owner(notebook, current_user)
         self.repository.soft_delete(notebook, datetime.now(UTC))
 
-    def _get_active_notebook(self, notebook_id: UUID) -> Notebook:
+    def _get_active_notebook(self, notebook_id: UUID) -> NotebookEntity:
         """Return notebook by id or raise 404 if missing/deleted.
 
         Args:
             notebook_id: UUID.
 
         Returns:
-            Активная ORM-запись.
+            Активная domain entity.
 
         Raises:
             HTTPException: 404 в обоих сценариях «нет» и «soft-deleted».
@@ -311,11 +312,13 @@ class NotebookService:
             raise notebook_not_found()
         return notebook
 
-    def _ensure_owner(self, notebook: Notebook, current_user: CurrentUser) -> None:
+    def _ensure_owner(
+        self, notebook: NotebookEntity, current_user: CurrentUser
+    ) -> None:
         """Raise 403 if the notebook does not belong to the user.
 
         Args:
-            notebook: ORM-запись.
+            notebook: Domain entity.
             current_user: Авторизованный пользователь.
 
         Raises:
@@ -402,7 +405,7 @@ class NotebookService:
         ]
 
     def _matches_create_payload(
-        self, notebook: Notebook, payload: NotebookCreate
+        self, notebook: NotebookEntity, payload: NotebookCreate
     ) -> bool:
         """Tell whether an existing row matches an idempotent POST payload.
 
@@ -411,7 +414,7 @@ class NotebookService:
         ``owner_id`` намеренно вне сравнения.
 
         Args:
-            notebook: Существующая ORM-запись.
+            notebook: Существующая domain entity.
             payload: Тело повторного POST.
 
         Returns:
@@ -424,15 +427,15 @@ class NotebookService:
             and (notebook.cells or []) == self._cells_to_storage(payload.cells)
         )
 
-    def to_response(self, notebook: Notebook) -> NotebookResponse:
-        """Map an ORM ``Notebook`` to a public :class:`NotebookResponse`.
+    def to_response(self, notebook: NotebookEntity) -> NotebookResponse:
+        """Map a domain ``NotebookEntity`` to a public :class:`NotebookResponse`.
 
         Времена переводятся в миллисекунды от эпохи, ``cells`` отдаются
-        в том виде, в котором лежат в JSONB. Это — единственная точка
-        проекции «БД → API» для деталки ноутбука.
+        в API/JSON shape. Это — единственная точка проекции
+        «domain entity → API» для деталки ноутбука.
 
         Args:
-            notebook: ORM-объект.
+            notebook: Domain entity.
 
         Returns:
             DTO для ответа.
@@ -447,15 +450,15 @@ class NotebookService:
             updated_at=datetime_to_unix_ms(notebook.updated_at),
         )
 
-    def to_list_item(self, notebook: Notebook) -> NotebookListItem:
-        """Map an ORM ``Notebook`` to a lightweight list item.
+    def to_list_item(self, notebook: NotebookEntity) -> NotebookListItem:
+        """Map a domain ``NotebookEntity`` to a lightweight list item.
 
         В отличие от :meth:`to_response`, ``cells`` *не отдаются* — только
         их количество. Это бережёт пропускную способность для тяжёлых
         ноутбуков и не нагружает фронт лишним JSON.
 
         Args:
-            notebook: ORM-объект.
+            notebook: Domain entity.
 
         Returns:
             «Тонкий» DTO для списка.

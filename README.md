@@ -44,6 +44,7 @@ backend domain boundary spec (TARDIS-31): PostgreSQL schemas `users` /
 │   │   └── notebooks
 │   │       ├── controllers/   # /notebooks/* HTTP endpoints (no SQLAlchemy)
 │   │       ├── dependencies.py # get_notebook_service DI factory
+│   │       ├── entities.py    # storage-neutral NotebookEntity
 │   │       ├── models/        # SQLAlchemy ORM (notebooks.notebooks)
 │   │       ├── repositories/  # NotebookRepository + NotebookRepositoryProtocol
 │   │       ├── schemas/       # Pydantic DTOs
@@ -281,14 +282,17 @@ auto-propagates into a new image without manual intervention.
    ├── __init__.py            # re-exports the module router
    ├── controllers/           # HTTP only, no SQLAlchemy imports
    ├── dependencies.py        # DI factories that wire repository → service
+   ├── entities.py            # storage-neutral domain entities, if needed
    ├── models/                # SQLAlchemy ORM (if module owns storage)
    ├── repositories/          # DAL + repository Protocol (storage contract)
    ├── schemas/               # Pydantic request/response DTOs
-   └── services/              # business rules, typed against repository Protocol
+   └── services/              # business rules, typed against entities + Protocol
    ```
 
    Controllers must depend only on `dependencies.get_<thing>` factories —
    never import `Session`, `select`, or a concrete repository class.
+   Services must not import SQLAlchemy models; repository implementations map
+   storage rows/documents to storage-neutral entities.
    See [`docs/domain-boundaries.md`](docs/domain-boundaries.md) §5–6 for
    the layering rules.
 

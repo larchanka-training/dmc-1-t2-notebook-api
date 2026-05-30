@@ -128,7 +128,8 @@ HTTP request
   -> Controller (HTTP-only: URL, status, query/body, Depends)
   -> Schema/DTO (Pydantic validation)
   -> Service (business rules: owner check, formatVersion, merge)
-  -> Repository (data access; knows SQLAlchemy)
+  -> Entity (storage-neutral NotebookEntity)
+  -> Repository (data access; maps entity <-> storage model)
   -> ORM model (table mapping)
 ```
 
@@ -136,9 +137,8 @@ Hard rules:
 
 - **Controller does not import SQLAlchemy**: no `Session`, `select`, `flush`,
   etc. It also does not import a concrete repository class.
-- **Service does not import SQLAlchemy**: it can use Pydantic schemas, ORM
-  entities as repository return types for the MVP, and the repository
-  protocol.
+- **Service does not import SQLAlchemy**: it uses Pydantic schemas,
+  `NotebookEntity`, and the repository protocol.
 - **Repository is the only place that owns SQLAlchemy access.**
 
 This is not overengineering. These rules exist so that a future SQL -> NoSQL
@@ -155,12 +155,14 @@ valid implementation; explicit inheritance from `Protocol` is not required.
 from typing import Protocol
 
 class NotebookRepositoryProtocol(Protocol):
-    def get_by_id(self, notebook_id: UUID) -> Notebook | None: ...
+    def get_by_id(self, notebook_id: UUID) -> NotebookEntity | None: ...
     def list_by_owner(
         self, owner_id: UUID, limit: int, offset: int, sort: str, order: str
-    ) -> tuple[list[Notebook], int]: ...
-    def save(self, notebook: Notebook) -> Notebook: ...
-    def soft_delete(self, notebook: Notebook, deleted_at: datetime) -> Notebook: ...
+    ) -> tuple[list[NotebookEntity], int]: ...
+    def save(self, notebook: NotebookEntity) -> NotebookEntity: ...
+    def soft_delete(
+        self, notebook: NotebookEntity, deleted_at: datetime
+    ) -> NotebookEntity: ...
 ```
 
 ```python
@@ -169,21 +171,24 @@ class NotebookService:
         self.repository = repository
 ```
 
-`NotebookRepository` (SQLAlchemy) remains as-is. It is one concrete
-implementation. In the future, another implementation such as
-`MongoNotebookRepository` can be added, and the DI factory will choose which
-one to inject.
+`NotebookRepository` (SQLAlchemy) remains the concrete MVP implementation, but
+it maps ORM rows to `NotebookEntity` before returning data to the service. In
+the future, another implementation such as `MongoNotebookRepository` can be
+added, and the DI factory will choose which one to inject. The service and
+controllers continue to work with the same entity/protocol boundary.
 
 **Location of the `get_notebook_service` DI factory:** it lives in
 `app/modules/notebooks/dependencies.py`, so controllers import only a ready
 dependency and do not know about `Session` or a concrete repository class.
-This supports the ticket acceptance criterion that controllers must not import
-SQLAlchemy or storage-specific details.
+This supports the ticket acceptance criterion that controllers and services
+must not import SQLAlchemy or storage-specific details.
 
-> Note: for the MVP, the protocol returns the ORM `Notebook`. During a NoSQL
-> migration, introduce a pure domain entity (for example, a `@dataclass`
-> without SQLAlchemy) and update the protocol return type. The service is
-> already isolated from the concrete repository implementation.
+**Transactional invariant:** current operations are atomic only at the
+single-notebook level. A notebook is stored as one document-like aggregate
+(`cells` JSONB today; one document in a future NoSQL store), and operations
+create, patch, or soft-delete that one aggregate. Cross-notebook or
+cross-document transactions are out of scope and must not become a hidden
+requirement for future NoSQL implementations.
 
 ## 7. Liquibase: Append-Only Strategy
 
