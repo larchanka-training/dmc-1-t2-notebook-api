@@ -2,11 +2,14 @@
 
 > Архитектурный документ. Целевая модель авторизации и хранения данных для JS Notebook (api). Соответствует требованиям TARDIS-15.
 >
-> Документ разделяет **текущее MVP-состояние PR #29** и **целевую**
-> OTP/JWT-модель. В PR #29 реализован placeholder auth:
+> Документ разделяет **исходное MVP-состояние PR #29**, **текущий
+> TARDIS-75 work-in-progress** и **целевую** OTP/JWT-модель. В PR #29
+> реализован placeholder auth:
 > `CurrentUser`, `get_current_user`, dev/test/local `X-User-Id`,
-> `DEV_USER` fallback и `GET /api/v1/auth/me`. Реальная OTP/JWT-авторизация
-> реализуется отдельной задачей без изменения notebook controllers.
+> `DEV_USER` fallback и `GET /api/v1/auth/me`. В TARDIS-75 уже добавлены
+> auth storage, OTP request/verify endpoints, access-token issuing and initial
+> refresh-token storage. Refresh rotation, logout and Bearer cutover для
+> `/auth/me`/notebook endpoints остаются следующими шагами.
 
 ## Содержание
 
@@ -33,6 +36,28 @@
 - Доступ к API — по **JWT access token**, серверная ревокация — через **refresh token + таблицу sessions**.
 - LLM-ключи и любые секреты — только на бэке. Фронт не получает ничего, кроме access/refresh.
 - Ноутбуки привязаны к пользователю: один владелец, многоустройственный доступ, ручной и автоматический sync.
+
+### 1.1. Текущий статус реализации TARDIS-75
+
+На текущем backend branch реализован первый рабочий срез real auth:
+
+- Liquibase schema для `users.otps`, `users.sessions`,
+  `users.refresh_tokens`;
+- ORM-модели и repository слой для этих таблиц;
+- runtime settings для JWT/OTP TTL и production-safe placeholder auth;
+- `EmailService` boundary с текущей no-op реализацией;
+- OTP/token primitives без новых зависимостей;
+- `POST /api/v1/auth/otp/request`;
+- `POST /api/v1/auth/otp/verify`;
+- `api/docs/openapi.json` синхронизирован с этими endpoint’ами.
+
+Ещё не реализовано в этом срезе:
+
+- `POST /api/v1/auth/refresh`;
+- `POST /api/v1/auth/logout`;
+- Bearer-based `GET /api/v1/auth/me`;
+- Bearer cutover для notebook endpoints;
+- rate limiting / OTP attempt counter / cleanup jobs.
 
 ---
 
@@ -112,17 +137,19 @@ POST /api/v1/auth/logout  → revoke session
 
 - Refresh — это **opaque random string** (32+ байта, base64url), а не JWT. JWT-формат для refresh избыточен: он всё равно проверяется через БД.
 - В БД хранится **хеш** (`sha256` или `argon2`), не сам токен. Утечка БД не даёт активные refresh-токены.
-- История всех refresh-токенов сессии хранится в отдельной таблице `refresh_tokens` (§4.4). Связь с сессией — по `session_id`, связь внутри family — по `replaced_by_id`.
+- История всех refresh-токенов сессии хранится в отдельной таблице
+  `refresh_tokens` (§4.4). Связь с сессией — по `session_id`, связь внутри
+  token family — по `family_id`.
 
 ---
 
 ## 4. Модели данных
 
-Все таблицы в схеме `app`.
+Auth и user tables находятся в PostgreSQL-схеме `users`.
 
 ### 4.1. `users`
 
-**Текущее MVP-состояние PR #29:**
+**Текущее состояние после TARDIS-31 / TARDIS-75:**
 
 | Колонка | Тип | Описание |
 |---|---|---|
@@ -131,39 +158,37 @@ POST /api/v1/auth/logout  → revoke session
 | `display_name` | `text` NULL | Опционально, для UI. |
 | `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
 
-**Целевая real-auth схема после OTP/JWT задачи:**
+**Возможные future-поля вне текущего TARDIS-75 среза:**
 
 | Колонка | Тип | Описание |
 |---|---|---|
-| `id` | `uuid` PK | Идентификатор пользователя. |
-| `email` | `citext` UNIQUE NOT NULL | Email, case-insensitive. |
-| `display_name` | `text` NULL | Опционально, для UI. |
-| `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
 | `last_login_at` | `timestamptz` NULL | Обновляется на каждом успешном verify. |
 | `biometric_snapshot` | `jsonb` NULL | Placeholder для будущей биометрии (см. §10). |
 
 ### 4.2. `otps`
 
-> Future real-auth schema. Таблица не входит в PR #29.
+> Implemented in TARDIS-75 schema draft.
 
 | Колонка | Тип | Описание |
 |---|---|---|
 | `id` | `uuid` PK | |
-| `user_id` | `uuid` FK → users.id NULL | NULL до первого verify (user ещё не создан). |
-| `email` | `citext` NOT NULL | Денормализация, чтобы выдавать OTP до создания user. |
-| `code_hash` | `text` NOT NULL | sha256(code + per-row salt) или argon2. Никогда не хранить plain. |
+| `email` | `text` NOT NULL | Денормализация, чтобы выдавать OTP до создания user. |
+| `otp_hash` | `text` NOT NULL | Хеш OTP. Plain OTP не хранится. |
 | `expires_at` | `timestamptz` NOT NULL | now() + 5 минут. |
 | `used_at` | `timestamptz` NULL | NULL = ещё не использован. |
-| `attempts` | `int` NOT NULL DEFAULT 0 | Счётчик неудачных попыток verify. |
 | `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
 
 **Индексы:**
-- `(email, created_at DESC)` — для последнего активного OTP пользователя.
+- `otps_email_active_idx` on `(email, expires_at DESC) WHERE used_at IS NULL`
+  — для последнего активного OTP пользователя.
 - TTL-cleanup через cron: `DELETE FROM otps WHERE expires_at < now() - interval '1 day'`.
+
+`attempts` / per-OTP failed-attempt invalidation — future hardening, не часть
+текущего schema среза.
 
 ### 4.3. `sessions`
 
-> Future real-auth schema. Таблица не входит в PR #29.
+> Implemented in TARDIS-75 schema draft.
 
 Метаданные сессии. Одна запись — одна «авторизация» пользователя (логин с одного устройства → logout или истечение).
 
@@ -171,42 +196,49 @@ POST /api/v1/auth/logout  → revoke session
 |---|---|---|
 | `id` | `uuid` PK | Совпадает с `sessionId` в JWT. |
 | `user_id` | `uuid` FK → users.id NOT NULL | |
-| `user_agent` | `text` NULL | Для аудита. |
-| `ip` | `inet` NULL | Для аудита. |
 | `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
 | `expires_at` | `timestamptz` NOT NULL | now() + 30 дней. Не продлевается при refresh — иначе «вечная» сессия. |
 | `revoked_at` | `timestamptz` NULL | NULL = активна. Ставится при logout или при детекте reuse. |
 
 **Индексы:**
-- `(user_id, revoked_at)` — активные сессии пользователя.
+- `sessions_user_active_idx` on `(user_id, expires_at DESC) WHERE revoked_at IS NULL`
+  — активные сессии пользователя.
 
 > `refresh_token_hash` в этой таблице НЕ хранится. История токенов сессии — в `refresh_tokens` (§4.4).
 
 ### 4.4. `refresh_tokens` (token family)
 
-> Future real-auth schema. Таблица не входит в PR #29.
+> Implemented in TARDIS-75 schema draft.
 
-Цепочка refresh-токенов в пределах одной сессии. Нужна для reuse-detection (§2.2, §5.3).
+Цепочка refresh-токенов в пределах одной token family. Нужна для
+reuse-detection (§2.2, §5.3).
 
 | Колонка | Тип | Описание |
 |---|---|---|
 | `id` | `uuid` PK | |
 | `session_id` | `uuid` FK → sessions.id NOT NULL | |
 | `token_hash` | `text` NOT NULL UNIQUE | sha256(refresh). |
+| `family_id` | `uuid` NOT NULL | Идентификатор token family для rotation/reuse detection. |
 | `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
-| `replaced_at` | `timestamptz` NULL | Когда токен был ротирован. NULL = текущий в family. |
-| `replaced_by_id` | `uuid` FK → refresh_tokens.id NULL | Линк на преемника. Нужен для восстановления цепочки при расследовании reuse. |
+| `expires_at` | `timestamptz` NOT NULL | Истечение refresh token/session window. |
+| `rotated_at` | `timestamptz` NULL | Когда токен был ротирован. NULL = текущий в family. |
 | `revoked_at` | `timestamptz` NULL | Ставится при reuse-detection для всех токенов family. |
+| `reuse_detected_at` | `timestamptz` NULL | Ставится на токене/family при reuse detection. |
 
 **Инварианты:**
-- В family (`session_id = X`) максимум **одна** запись имеет `replaced_at IS NULL AND revoked_at IS NULL` — она и есть текущий активный refresh-токен.
-- После rotation: старый токен получает `replaced_at = now()` и `replaced_by_id = <новый token_id>`; новый токен вставляется с `replaced_at = NULL`.
-- При reuse-detection (§5.3) все токены с данным `session_id` получают `revoked_at = now()` + `sessions.revoked_at = now()`.
+- В family (`family_id = X`) максимум **одна** запись имеет
+  `rotated_at IS NULL AND revoked_at IS NULL` — она и есть текущий активный
+  refresh-токен.
+- После rotation: старый токен получает `rotated_at = now()`; новый токен
+  вставляется с тем же `family_id` и `rotated_at = NULL`.
+- При reuse-detection (§5.3) все активные токены данной family получают
+  `revoked_at = now()` / `reuse_detected_at = now()` + `sessions.revoked_at = now()`.
 
 **Индексы:**
 - `(token_hash)` UNIQUE — поиск при `POST /api/v1/auth/refresh`.
-- `(session_id, created_at DESC)` — выборка family для отзыва.
-- Partial: `(session_id) WHERE replaced_at IS NULL AND revoked_at IS NULL` — поиск текущего токена сессии.
+- `refresh_tokens_session_idx` on `(session_id)`;
+- `refresh_tokens_family_idx` on `(family_id, created_at DESC)`;
+- `refresh_tokens_active_idx` on `(session_id, expires_at DESC) WHERE revoked_at IS NULL AND rotated_at IS NULL`.
 
 **Cleanup:** cron удаляет записи, у которых `session.expires_at < now() - interval '90 days'` (согласуется с sessions retention в §11).
 
@@ -263,12 +295,17 @@ timestamps в FE/BE JSON-контрактах.
 
 **Errors:**
 - `400 invalid_email` — невалидный формат.
-- `429 too_many_otp_requests` — rate limit превышен (см. §10).
+- `422 validation_error` — body/schema validation error, в стандартном
+  `ApiErrorResponse` envelope.
+
+`429 too_many_otp_requests` — целевое поведение после отдельной задачи по rate
+limiting (§11); текущий TARDIS-75 срез его ещё не реализует.
 
 **Side effects:**
 - Все предыдущие неиспользованные OTP этого email помечаются `used_at = now()` (инвалидация).
 - Создаётся новая запись в `otps` с `expires_at = now() + 5 мин`.
-- Проверяется rate limit по email.
+- Email нормализуется и передаётся в `EmailService`. Текущая реализация
+  delivery boundary — no-op/stub; реальный provider выбирается отдельно.
 
 ### 5.2. `POST /api/v1/auth/otp/verify`
 
@@ -289,21 +326,35 @@ timestamps в FE/BE JSON-контрактах.
 ```
 
 **Errors:**
-- `401 invalid_otp` — код не совпал. `attempts += 1`. На 5-й неудаче OTP помечается `used_at = now()`.
-- `401 otp_expired` — `expires_at < now()`.
-- `401 otp_already_used` — повторная попытка использовать уже использованный код.
+- `400 invalid_email` — невалидный формат email.
+- `401 invalid_otp` — нет активного OTP, код не совпал, код истёк или уже был
+  использован. Текущий backend не раскрывает отдельную причину в `error.code`,
+  чтобы не усложнять первый MVP-срез.
+- `422 validation_error` — body/schema validation error, в стандартном
+  `ApiErrorResponse` envelope.
+
+`otp_expired`, `otp_already_used` и per-OTP attempt counter — целевое
+дальнейшее уточнение контракта. Если эти коды будут добавлены, одновременно
+обновляются `api/docs/openapi.json`, `ui/openapi/auth.openapi.yaml` и
+`ui/docs/auth.md`.
 
 **Side effects:**
 - Если user с этим email не существует — создаётся.
 - OTP помечается `used_at = now()`.
-- `users.last_login_at = now()`.
-- Создаётся запись в `sessions` (метаданные: user_id, user_agent, ip, expires_at).
-- Создаётся **первая запись в `refresh_tokens`** для этой сессии: `token_hash = sha256(refresh)`, `replaced_at = NULL`, `revoked_at = NULL`.
+- Создаётся запись в `sessions` (`user_id`, `created_at`, `expires_at`).
+- Создаётся **первая запись в `refresh_tokens`** для этой сессии:
+  `token_hash = sha256(refresh)`, новый `family_id`, `rotated_at = NULL`,
+  `revoked_at = NULL`, `reuse_detected_at = NULL`.
 - Генерируется access JWT (`sub = user.id`, `sessionId = session.id`, TTL 15 мин).
 
 ### 5.3. `POST /api/v1/auth/refresh`
 
-Ротирует refresh-токен в пределах family и выдаёт новый access. Реализует reuse-detection через `refresh_tokens.replaced_at`/`revoked_at`.
+> Target contract. Endpoint ещё не реализован в текущем TARDIS-75 OTP
+> request/verify срезе.
+
+Ротирует refresh-токен в пределах family и выдаёт новый access. Реализует
+reuse-detection через `refresh_tokens.rotated_at`/`revoked_at`/
+`reuse_detected_at`.
 
 **Request:**
 ```json
@@ -322,13 +373,14 @@ timestamps в FE/BE JSON-контрактах.
 3. `session = SELECT * FROM sessions WHERE id = token.session_id`.
 4. Если `session.revoked_at IS NOT NULL` — `401 refresh_revoked` (сессия уже отозвана).
 5. Если `session.expires_at < now()` — `401 refresh_expired`.
-6. **Детект reuse:** если `token.replaced_at IS NOT NULL OR token.revoked_at IS NOT NULL`:
-   - `UPDATE refresh_tokens SET revoked_at = now() WHERE session_id = token.session_id AND revoked_at IS NULL`.
+6. **Детект reuse:** если `token.rotated_at IS NOT NULL OR token.revoked_at IS NOT NULL`:
+   - `UPDATE refresh_tokens SET revoked_at = now(), reuse_detected_at = now() WHERE family_id = token.family_id AND revoked_at IS NULL`.
    - `UPDATE sessions SET revoked_at = now() WHERE id = token.session_id`.
    - Логируем security event (token_id, session_id, user_id, ip, user_agent).
    - Вернуть `401 refresh_reuse_detected`.
-7. Нормальный путь: сгенерировать новый refresh, вставить в `refresh_tokens` (`new_token` с `replaced_at = NULL`, `revoked_at = NULL`).
-8. `UPDATE refresh_tokens SET replaced_at = now(), replaced_by_id = new_token.id WHERE id = token.id`.
+7. Нормальный путь: сгенерировать новый refresh, вставить в `refresh_tokens`
+   (`new_token` с тем же `family_id`, `rotated_at = NULL`, `revoked_at = NULL`).
+8. `UPDATE refresh_tokens SET rotated_at = now() WHERE id = token.id`.
 9. Сгенерировать новый access JWT.
 
 **Errors:**
@@ -340,6 +392,9 @@ timestamps в FE/BE JSON-контрактах.
 **Что не делаем:** НЕ отзываем прочие сессии пользователя. False-positive выбесит людей с несколькими устройствами. Если реальная утечка затронула одно устройство — берём эту одну сессию. Для массовых инцидентов нужен отдельный admin-flow.
 
 ### 5.4. `POST /api/v1/auth/logout`
+
+> Target contract. Endpoint ещё не реализован в текущем TARDIS-75 OTP
+> request/verify срезе.
 
 **Headers:** `Authorization` НЕ требуется. Авторизация endpoint’а — по самому `refreshToken` (владение токеном → право его отозвать). Это позволяет отозвать сессию, даже когда access уже истёк — без вынужденного refresh-раунда.
 
@@ -355,12 +410,12 @@ timestamps в FE/BE JSON-контрактах.
 | Сценарий | Действие бэка | HTTP |
 |---|---|---|
 | Токен найден, family активна | Отзываем всё family + `sessions.revoked_at` | 204 |
-| Токен найден, но у него уже `replaced_at` или `revoked_at` | Идемпотентный no-op (legit кейсы: двойной logout, race с rotation). **НЕ** триггерим reuse-detection (§5.3) — это логаут, не refresh. | 204 |
+| Токен найден, но у него уже `rotated_at` или `revoked_at` | Идемпотентный no-op (legit кейсы: двойной logout, race с rotation). **НЕ** триггерим reuse-detection (§5.3) — это логаут, не refresh. | 204 |
 | Токен не найден вовсе | No-op (возможно, мусор в боди или локальный stale буфер клиента) | 204 |
 
 **Side effects (путь «family активна»):**
 
-- `UPDATE refresh_tokens SET revoked_at = now() WHERE session_id = token.session_id AND revoked_at IS NULL`.
+- `UPDATE refresh_tokens SET revoked_at = now() WHERE family_id = token.family_id AND revoked_at IS NULL`.
 - `UPDATE sessions SET revoked_at = now() WHERE id = token.session_id AND revoked_at IS NULL`.
 
 **Почему без access:**
@@ -370,6 +425,8 @@ timestamps в FE/BE JSON-контрактах.
 - Для отзыва всех сессий пользователя («logout everywhere») нужен отдельный endpoint, требующий валидный access. Не в этой задаче.
 
 ### 5.5. `GET /api/v1/auth/me`
+
+> Current state: placeholder endpoint. Bearer-based cutover ещё не реализован.
 
 **Headers:** в placeholder-режиме можно не передавать заголовки. Для dev/test
 можно передать `X-User-Id: <uuid>`. В real-auth режиме будет
@@ -402,12 +459,15 @@ dev-only placeholder user row. DB-уровневого FK на `users.users` у
 
 | Режим | Email-вызов | OTP в ответе | HTTP code |
 |---|---|---|---|
-| `prod` | Да, через внешний API | Нет | 204 |
-| `dev` / `local` / `test` | Нет | Да, в JSON | 200 |
+| `prod` / `production` / `staging` | Через `EmailService` boundary; real provider выбирается отдельной задачей | Нет | 204 |
+| `dev` / `local` / `test` | No-op delivery boundary | Да, в JSON | 200 |
 
 **Defence-in-depth:** Endpoint **никогда** не возвращает OTP в prod — это должно быть покрыто интеграционным тестом, который выставляет `APP_ENV=prod` и проверяет `204` + отсутствие поля `otp` в боди.
 
-**Выбор поставщика email:** открытый вопрос. Отправка email должна быть абстрагирована интерфейсом `EmailService.send_otp(email, code)`, чтобы поставщика можно было заменить. В `dev`/`local`/`test` реализация — no-op stub, пишущий в лог.
+**Выбор поставщика email:** открытый вопрос. Отправка email уже
+абстрагирована интерфейсом `EmailService.send_otp(email, code, expires_at)`,
+чтобы поставщика можно было заменить. Текущая реализация — no-op boundary,
+который не пишет raw OTP в лог.
 
 ---
 
@@ -697,11 +757,15 @@ VM) отдаёт nginx (`proxy/`), не backend-приложение. Измен
 | `OTP_TTL_SECONDS` | `300` | 5 минут. |
 | `OTP_MAX_ATTEMPTS` | `5` | Неудачных попыток до инвалидации. |
 | `OTP_RATE_LIMIT_PER_EMAIL` | `3` | Запросов / 15 мин. |
-| `EMAIL_PROVIDER` | `noop` | `sendgrid` / `resend` / `postmark` / `smtp` / `noop`. В dev/local/test — `noop`. |
-| `EMAIL_PROVIDER_API_KEY` | — | Ключ вендора. |
-| `EMAIL_FROM` | `no-reply@notebook.example` | From-адрес. |
+| `ALLOW_PLACEHOLDER_AUTH` | auto | Optional override. Работает только в local-like env; в production-like env запрещён validation’ом. |
 
-Существующие в `app/core/config.py` переменные `token_ttl_seconds` (86400) и `session_ttl_seconds` (604800) подлежат замене на пару access/refresh выше. Переменные `oauth_name_*` — удалить, OAuth-провайдеры не используются.
+Future email-provider settings (`EMAIL_PROVIDER`, `EMAIL_PROVIDER_API_KEY`,
+`EMAIL_FROM`) будут добавлены отдельной задачей при выборе провайдера. Сейчас
+таких runtime settings в `app/core/config.py` нет.
+
+Существующие в `app/core/config.py` residual-переменные `token_ttl_seconds`
+(86400), `session_ttl_seconds` (604800) и `oauth_name_*` не используются новой
+OTP/JWT реализацией и подлежат удалению отдельной cleanup-задачей.
 
 ---
 

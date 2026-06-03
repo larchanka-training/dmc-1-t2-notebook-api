@@ -7,8 +7,9 @@
 """
 
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.modules.auth.models.user import User
@@ -40,6 +41,32 @@ class UserRepository:
             ``User`` или ``None``, если запись не найдена.
         """
         return self.db.get(User, user_id)
+
+    def get_by_email(self, email: str) -> User | None:
+        """Fetch a user by normalized email."""
+        statement = select(User).where(User.email == email)
+        return self.db.execute(statement).scalar_one_or_none()
+
+    def get_or_create_by_email(
+        self,
+        email: str,
+        created_at: datetime,
+        display_name: str | None = None,
+    ) -> User:
+        """Return a user by email, creating it when missing."""
+        user = self.get_by_email(email)
+        if user is not None:
+            return user
+
+        user = User(
+            id=uuid4(),
+            email=email,
+            display_name=display_name,
+            created_at=created_at,
+        )
+        self.db.add(user)
+        self.db.flush()
+        return user
 
     def get_or_create_placeholder_user(
         self,

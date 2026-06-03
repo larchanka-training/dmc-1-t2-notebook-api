@@ -10,6 +10,11 @@ from app.modules.auth.services.otp_request_service import (
     OtpRequestResult,
     OtpRequestService,
 )
+from app.modules.auth.services.otp_verify_service import (
+    OtpVerifyError,
+    OtpVerifyResult,
+    OtpVerifyService,
+)
 from app.modules.auth.services.token_service import (
     AccessTokenClaims,
     AccessTokenError,
@@ -26,5 +31,8 @@ __all__ = [
     "OtpCodeService",
     "OtpRequestResult",
     "OtpRequestService",
+    "OtpVerifyError",
+    "OtpVerifyResult",
+    "OtpVerifyService",
     "get_email_service",
 ]
