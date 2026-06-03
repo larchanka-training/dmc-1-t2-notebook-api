@@ -55,7 +55,7 @@ def get_current_user(
             401, если ``X-User-Id`` не парсится как UUID.
     """
     # Placeholder auth is dev-only until real OTP/JWT auth lands.
-    if settings.app_env not in {"dev", "test", "local"}:
+    if not settings.placeholder_auth_enabled:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail={
