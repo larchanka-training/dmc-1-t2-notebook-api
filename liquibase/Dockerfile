@@ -4,8 +4,10 @@
 # changes are applied here, separately from the API container.
 FROM liquibase/liquibase:4.31.1
 
-# Changelogs live under the image's default search path (/liquibase/changelog),
-# so --changelog-file is relative to it (e.g. changelog-master.xml).
+# Liquibase's default search path is /liquibase (not /liquibase/changelog), so
+# point it at where the changelogs live. Then --changelog-file is relative to it
+# (e.g. changelog-master.xml), and its relativeToChangelogFile includes resolve.
+ENV LIQUIBASE_SEARCH_PATH=/liquibase/changelog
 COPY changelog/ /liquibase/changelog/
 
 # Connection + changelog file are supplied at run time via the environment:
