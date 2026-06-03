@@ -15,6 +15,11 @@ from app.modules.auth.services.otp_verify_service import (
     OtpVerifyResult,
     OtpVerifyService,
 )
+from app.modules.auth.services.refresh_token_service import (
+    RefreshTokenError,
+    RefreshTokenResult,
+    RefreshTokenService,
+)
 from app.modules.auth.services.token_service import (
     AccessTokenClaims,
     AccessTokenError,
@@ -34,5 +39,8 @@ __all__ = [
     "OtpVerifyError",
     "OtpVerifyResult",
     "OtpVerifyService",
+    "RefreshTokenError",
+    "RefreshTokenResult",
+    "RefreshTokenService",
     "get_email_service",
 ]

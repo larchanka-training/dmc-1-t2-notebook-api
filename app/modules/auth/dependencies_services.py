@@ -14,6 +14,7 @@ from app.modules.auth.repositories import (
 from app.modules.auth.services import (
     OtpRequestService,
     OtpVerifyService,
+    RefreshTokenService,
     get_email_service,
 )
 
@@ -32,6 +33,15 @@ def get_otp_verify_service(db: Session = Depends(get_db)) -> OtpVerifyService:
     return OtpVerifyService(
         otp_repository=OtpRepository(db),
         user_repository=UserRepository(db),
+        session_repository=AuthSessionRepository(db),
+        refresh_token_repository=RefreshTokenRepository(db),
+        config=settings,
+    )
+
+
+def get_refresh_token_service(db: Session = Depends(get_db)) -> RefreshTokenService:
+    """Build the refresh-token rotation service for the current request."""
+    return RefreshTokenService(
         session_repository=AuthSessionRepository(db),
         refresh_token_repository=RefreshTokenRepository(db),
         config=settings,

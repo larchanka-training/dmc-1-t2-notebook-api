@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from app.core.errors import ApiErrorResponse
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.dependencies_services import (
+    get_refresh_token_service,
     get_otp_request_service,
     get_otp_verify_service,
 )
@@ -14,12 +15,16 @@ from app.modules.auth.schemas.user_schemas import (
     OtpRequestDevResponse,
     OtpVerifyRequest,
     OtpVerifyResponse,
+    RefreshRequest,
+    RefreshResponse,
 )
 from app.modules.auth.services import (
     InvalidEmailError,
     OtpRequestService,
     OtpVerifyError,
     OtpVerifyService,
+    RefreshTokenError,
+    RefreshTokenService,
 )
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -94,6 +99,34 @@ def verify_otp(
             display_name=result.user.display_name,
             roles=[],
         ),
+    )
+
+
+@router.post(
+    "/refresh",
+    response_model=RefreshResponse,
+    responses={
+        401: {"model": ApiErrorResponse, "description": "Invalid refresh token"},
+        422: {"model": ApiErrorResponse, "description": "Validation error"},
+    },
+    summary="Refresh auth tokens",
+)
+def refresh_tokens(
+    payload: RefreshRequest,
+    service: RefreshTokenService = Depends(get_refresh_token_service),
+) -> RefreshResponse:
+    """Rotate a refresh token and return a new token pair."""
+    try:
+        result = service.refresh(refresh_token=payload.refresh_token)
+    except RefreshTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": str(exc), "message": "Invalid refresh token"},
+        ) from exc
+
+    return RefreshResponse(
+        access_token=result.access_token,
+        refresh_token=result.refresh_token,
     )
 
 

@@ -42,6 +42,15 @@ class RefreshTokenRepository:
         statement = select(RefreshToken).where(RefreshToken.token_hash == token_hash)
         return self.db.execute(statement).scalar_one_or_none()
 
+    def get_by_hash_for_update(self, token_hash: str) -> RefreshToken | None:
+        """Fetch a refresh-token row by token hash and lock it for rotation."""
+        statement = (
+            select(RefreshToken)
+            .where(RefreshToken.token_hash == token_hash)
+            .with_for_update()
+        )
+        return self.db.execute(statement).scalar_one_or_none()
+
     def mark_rotated(
         self, token: RefreshToken, rotated_at: datetime
     ) -> RefreshToken:

@@ -7,8 +7,8 @@
 > реализован placeholder auth:
 > `CurrentUser`, `get_current_user`, dev/test/local `X-User-Id`,
 > `DEV_USER` fallback и `GET /api/v1/auth/me`. В TARDIS-75 уже добавлены
-> auth storage, OTP request/verify endpoints, access-token issuing and initial
-> refresh-token storage. Refresh rotation, logout and Bearer cutover для
+> auth storage, OTP request/verify endpoints, access-token issuing and
+> refresh-token rotation. Logout and Bearer cutover для
 > `/auth/me`/notebook endpoints остаются следующими шагами.
 
 ## Содержание
@@ -49,11 +49,11 @@
 - OTP/token primitives без новых зависимостей;
 - `POST /api/v1/auth/otp/request`;
 - `POST /api/v1/auth/otp/verify`;
+- `POST /api/v1/auth/refresh`;
 - `api/docs/openapi.json` синхронизирован с этими endpoint’ами.
 
 Ещё не реализовано в этом срезе:
 
-- `POST /api/v1/auth/refresh`;
 - `POST /api/v1/auth/logout`;
 - Bearer-based `GET /api/v1/auth/me`;
 - Bearer cutover для notebook endpoints;
@@ -101,7 +101,7 @@ POST /api/v1/auth/logout  → revoke session
 
 - **User создаётся лениво.** При первом успешном `otp/verify` для нового email — создаётся запись в `users`. Отдельной регистрации нет.
 - **OTP одноразовый.** После успешного verify помечается `used_at` и больше не принимается.
-- **Refresh rotation.** При `POST /api/v1/auth/refresh` старый токен помечается как `replaced` и линкуется на своего преемника.
+- **Refresh rotation.** При `POST /api/v1/auth/refresh` старый токен помечается `rotated_at`, новый токен создаётся в той же `family_id`.
 - **Прочие сессии пользователя не отзываются** при refresh-token reuse одной сессии.
 - **Logout — серверный.** Помечает `sessions.revoked_at`. Любая последующая попытка refresh с этим токеном → 401.
 - **Access не отзывается.** При logout фронт сразу выкидывает access из памяти, но любой in-flight запрос с этим access успешно отработает до его `exp`. Это осознанный trade-off в пользу простоты и performance (никаких blocklist-проверок на каждый запрос).
@@ -349,9 +349,6 @@ limiting (§11); текущий TARDIS-75 срез его ещё не реали
 
 ### 5.3. `POST /api/v1/auth/refresh`
 
-> Target contract. Endpoint ещё не реализован в текущем TARDIS-75 OTP
-> request/verify срезе.
-
 Ротирует refresh-токен в пределах family и выдаёт новый access. Реализует
 reuse-detection через `refresh_tokens.rotated_at`/`revoked_at`/
 `reuse_detected_at`.
@@ -388,6 +385,8 @@ reuse-detection через `refresh_tokens.rotated_at`/`revoked_at`/
 - `401 refresh_revoked` — сессия уже отозвана (logout или предыдущий reuse-detection).
 - `401 refresh_expired` — сессия истекла.
 - `401 refresh_reuse_detected` — принесли уже ротированный токен. Атака или баг клиента (например сломался single-flight). Сессия отозвана, пользователю нужен повторный OTP-логин.
+- `422 validation_error` — body/schema validation error, в стандартном
+  `ApiErrorResponse` envelope.
 
 **Что не делаем:** НЕ отзываем прочие сессии пользователя. False-positive выбесит людей с несколькими устройствами. Если реальная утечка затронула одно устройство — берём эту одну сессию. Для массовых инцидентов нужен отдельный admin-flow.
 

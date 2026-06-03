@@ -128,6 +128,7 @@ def test_refresh_token_repository_marks_rotation_reuse_and_family_revocation(
     )
 
     assert token_repo.get_by_hash("old-refresh-hash") == old_token
+    assert token_repo.get_by_hash_for_update("old-refresh-hash") == old_token
 
     token_repo.mark_rotated(old_token, now + timedelta(seconds=2))
     token_repo.mark_reuse_detected(old_token, now + timedelta(seconds=3))

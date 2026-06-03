@@ -55,3 +55,18 @@ class OtpVerifyResponse(BaseModel):
     access_token: str
     refresh_token: str
     user: CurrentUser
+
+
+class RefreshRequest(BaseModel):
+    """Request body for rotating a refresh token."""
+
+    refresh_token: str = Field(..., alias="refreshToken")
+
+
+class RefreshResponse(BaseModel):
+    """Successful refresh-token rotation response."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    access_token: str
+    refresh_token: str
