@@ -1,0 +1,205 @@
+name: Preview — per-PR API
+
+# Per-PR backend preview (preview-v2, option B). Each API PR gets its OWN api
+# container (image api-pr-<N>) on the shared preview ECS cluster, served under
+# /pr-<N>/api/v1 via the preview ALB + a per-PR listener rule. It uses the
+# SHARED preview_main database (option B) — so schema-changing PRs that add a
+# migration won't preview fully; those need per-PR databases (option A, later).
+#
+# Shared infra (cluster/ALB/RDS/CloudFront + main DATABASE_URL secret) lives in
+# the monorepo terraform (terraform/preview-cloud). This workflow only creates
+# the ephemeral per-PR slice (task def + target group + rule + service).
+#
+# Required repo config:
+#   secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  (the deploy-user keys)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+concurrency:
+  group: preview-api-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-north-1' }}
+  ECR_REGISTRY: "867633231218.dkr.ecr.eu-north-1.amazonaws.com"
+  ECR_REPOSITORY: "jsnotes-t2"
+  PREVIEW_CLUSTER: "jsnotes-t2-preview"
+  MAIN_TASK_FAMILY: "jsnotes-t2-preview-main-api"
+  MAIN_SERVICE: "jsnotes-t2-preview-main-api"
+  ALB_NAME: "jsnotes-t2-preview-alb"
+  PREVIEW_CF_DOMAIN: ${{ vars.PREVIEW_CLOUDFRONT_DOMAIN || 'd2e2ymc27fdfn5.cloudfront.net' }}
+  CONTAINER_NAME: "api"
+  API_PORT: "8000"
+  PR: ${{ github.event.pull_request.number }}
+
+jobs:
+  deploy:
+    name: Deploy per-PR API
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build & push api-pr-${{ env.PR }}
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password --region "${AWS_REGION}" \
+            | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+          IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:api-pr-${PR}"
+          docker build --target runtime -t "${IMAGE}" .
+          docker push "${IMAGE}"
+          echo "IMAGE=${IMAGE}" >> "${GITHUB_ENV}"
+
+      - name: Register per-PR task definition
+        run: |
+          set -euo pipefail
+          PREFIX="/pr-${PR}/api/v1"
+          FAMILY="preview-pr-${PR}"
+          HEALTH="python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:${API_PORT}${PREFIX}/health', timeout=3)\""
+
+          # Derive from the shared main-api task def: swap image, set API_PREFIX,
+          # fix the container health-check path, keep DATABASE_URL (-> preview_main),
+          # roles, logs. This is option B (shared DB).
+          aws ecs describe-task-definition --task-definition "${MAIN_TASK_FAMILY}" \
+            --query 'taskDefinition' > base.json
+          jq --arg IMG "${IMAGE}" --arg FAM "${FAMILY}" --arg PREFIX "${PREFIX}" --arg HEALTH "${HEALTH}" '
+            .family = $FAM
+            | .containerDefinitions |= map(
+                if .name == "api" then
+                  .image = $IMG
+                  | .environment = ((.environment // []) + [{name:"API_PREFIX", value:$PREFIX}])
+                  | .healthCheck.command = ["CMD-SHELL", $HEALTH]
+                  | .logConfiguration.options."awslogs-stream-prefix" = $FAM
+                else . end)
+            | {family, taskRoleArn, executionRoleArn, networkMode, containerDefinitions,
+               requiresCompatibilities, cpu, memory}
+          ' base.json > td.json
+          TD_ARN=$(aws ecs register-task-definition --cli-input-json file://td.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "TD_ARN=${TD_ARN}" >> "${GITHUB_ENV}"
+
+      - name: Target group + ALB rule + service
+        run: |
+          set -euo pipefail
+          PATH_PATTERN="/pr-${PR}/api/v1/*"
+          TG_NAME="preview-pr-${PR}-tg"
+
+          ALB_ARN=$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" \
+            --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+          VPC_ID=$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" \
+            --query 'LoadBalancers[0].VpcId' --output text)
+          LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn "${ALB_ARN}" \
+            --query "Listeners[?Port==\`80\`].ListenerArn | [0]" --output text)
+
+          # Target group (create if missing).
+          TG_ARN=$(aws elbv2 describe-target-groups --names "${TG_NAME}" \
+            --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || true)
+          if [ -z "${TG_ARN}" ] || [ "${TG_ARN}" = "None" ]; then
+            TG_ARN=$(aws elbv2 create-target-group --name "${TG_NAME}" \
+              --port "${API_PORT}" --protocol HTTP --vpc-id "${VPC_ID}" --target-type ip \
+              --health-check-path "/pr-${PR}/api/v1/health" \
+              --query 'TargetGroups[0].TargetGroupArn' --output text)
+          fi
+
+          # Listener rule (create if missing).
+          RULE_ARN=$(aws elbv2 describe-rules --listener-arn "${LISTENER}" \
+            --query "Rules[?Conditions[?Field=='path-pattern' && contains(Values, '${PATH_PATTERN}')]].RuleArn | [0]" \
+            --output text 2>/dev/null || true)
+          if [ -z "${RULE_ARN}" ] || [ "${RULE_ARN}" = "None" ]; then
+            aws elbv2 create-rule --listener-arn "${LISTENER}" --priority "$((1000 + PR))" \
+              --conditions "Field=path-pattern,Values=${PATH_PATTERN}" \
+              --actions "Type=forward,TargetGroupArn=${TG_ARN}" >/dev/null
+          fi
+
+          # Reuse the main-api service's network config (private subnets + ECS SG).
+          NETCFG=$(aws ecs describe-services --cluster "${PREVIEW_CLUSTER}" --services "${MAIN_SERVICE}" \
+            --query 'services[0].networkConfiguration.awsvpcConfiguration' --output json)
+          SUBNETS=$(echo "${NETCFG}" | jq -r '.subnets | join(",")')
+          SGS=$(echo "${NETCFG}" | jq -r '.securityGroups | join(",")')
+
+          # Service: create or update.
+          ACTIVE=$(aws ecs describe-services --cluster "${PREVIEW_CLUSTER}" --services "preview-pr-${PR}" \
+            --query 'services[?status==`ACTIVE`].serviceName | [0]' --output text 2>/dev/null || true)
+          if [ "${ACTIVE}" = "preview-pr-${PR}" ]; then
+            aws ecs update-service --cluster "${PREVIEW_CLUSTER}" --service "preview-pr-${PR}" \
+              --task-definition "${TD_ARN}" >/dev/null
+          else
+            aws ecs create-service --cluster "${PREVIEW_CLUSTER}" --service-name "preview-pr-${PR}" \
+              --task-definition "${TD_ARN}" --desired-count 1 --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SGS}],assignPublicIp=DISABLED}" \
+              --load-balancers "targetGroupArn=${TG_ARN},containerName=${CONTAINER_NAME},containerPort=${API_PORT}" >/dev/null
+          fi
+
+      - name: Wait for the service to stabilize
+        run: aws ecs wait services-stable --cluster "${PREVIEW_CLUSTER}" --services "preview-pr-${PR}"
+
+      - name: Sticky PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          URL="https://${PREVIEW_CF_DOMAIN}/pr-${PR}/api/v1/health"
+          BODY=$(printf '🔌 **API preview deployed:** %s\n(per-PR backend on the shared preview DB) — commit %s' "${URL}" "${GITHUB_SHA}")
+          gh pr comment "${PR}" --repo "${GITHUB_REPOSITORY}" --edit-last --body "${BODY}" \
+            || gh pr comment "${PR}" --repo "${GITHUB_REPOSITORY}" --body "${BODY}"
+
+  teardown:
+    name: Teardown per-PR API
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Remove the per-PR slice
+        run: |
+          set -euo pipefail
+          PATH_PATTERN="/pr-${PR}/api/v1/*"
+          TG_NAME="preview-pr-${PR}-tg"
+
+          # Service first (it references the target group).
+          if aws ecs describe-services --cluster "${PREVIEW_CLUSTER}" --services "preview-pr-${PR}" \
+               --query 'services[?status==`ACTIVE`]' --output text | grep -q .; then
+            aws ecs delete-service --cluster "${PREVIEW_CLUSTER}" --service "preview-pr-${PR}" --force >/dev/null || true
+          fi
+
+          ALB_ARN=$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" \
+            --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+          LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn "${ALB_ARN}" \
+            --query "Listeners[?Port==\`80\`].ListenerArn | [0]" --output text)
+          RULE_ARN=$(aws elbv2 describe-rules --listener-arn "${LISTENER}" \
+            --query "Rules[?Conditions[?Field=='path-pattern' && contains(Values, '${PATH_PATTERN}')]].RuleArn | [0]" \
+            --output text 2>/dev/null || true)
+          [ -n "${RULE_ARN}" ] && [ "${RULE_ARN}" != "None" ] && aws elbv2 delete-rule --rule-arn "${RULE_ARN}" || true
+
+          TG_ARN=$(aws elbv2 describe-target-groups --names "${TG_NAME}" \
+            --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || true)
+          [ -n "${TG_ARN}" ] && [ "${TG_ARN}" != "None" ] && aws elbv2 delete-target-group --target-group-arn "${TG_ARN}" || true
+
+      - name: Update PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${PR}" --repo "${GITHUB_REPOSITORY}" --edit-last \
+            --body "🧹 API preview for pr-${PR} torn down." || true
