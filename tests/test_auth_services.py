@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+import hashlib
 from uuid import uuid4
 
 import pytest
@@ -25,12 +26,13 @@ def test_otp_service_generates_six_digit_code_and_verifies_hash() -> None:
     service = OtpCodeService()
 
     code = service.generate_otp()
-    digest = service.hash_secret(code)
+    digest = service.hash_otp(code)
 
     assert len(code) == 6
     assert code.isdigit()
-    assert service.verify_secret(code, digest) is True
-    assert service.verify_secret("000000" if code != "000000" else "111111", digest) is False
+    assert digest != hashlib.sha256(code.encode("utf-8")).hexdigest()
+    assert service.verify_otp(code, digest) is True
+    assert service.verify_otp("000000" if code != "000000" else "111111", digest) is False
 
 
 def test_otp_service_generates_hashable_opaque_refresh_token() -> None:

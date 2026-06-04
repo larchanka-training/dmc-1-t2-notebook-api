@@ -34,6 +34,7 @@ def test_otp_repository_returns_latest_active_code(db_session: Session) -> None:
     )
 
     assert repo.get_latest_active_by_email("user@example.com", now) == latest
+    assert repo.get_latest_active_by_email_for_update("user@example.com", now) == latest
 
     repo.mark_used(latest, now + timedelta(seconds=2))
 
@@ -132,7 +133,11 @@ def test_refresh_token_repository_marks_rotation_reuse_and_family_revocation(
 
     token_repo.mark_rotated(old_token, now + timedelta(seconds=2))
     token_repo.mark_reuse_detected(old_token, now + timedelta(seconds=3))
-    revoked_count = token_repo.revoke_family(family_id, now + timedelta(seconds=4))
+    revoked_count = token_repo.revoke_family(
+        family_id,
+        now + timedelta(seconds=4),
+        reuse_detected_at=now + timedelta(seconds=4),
+    )
 
     db_session.refresh(old_token)
     db_session.refresh(new_token)
@@ -141,4 +146,5 @@ def test_refresh_token_repository_marks_rotation_reuse_and_family_revocation(
     assert old_token.reuse_detected_at is not None
     assert old_token.revoked_at is not None
     assert new_token.revoked_at is not None
+    assert new_token.reuse_detected_at is not None
     assert revoked_count == 2

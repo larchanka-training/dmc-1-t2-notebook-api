@@ -1,7 +1,9 @@
 """HTTP controller for the ``auth`` module."""
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from sqlalchemy.orm import Session
 
+from app.core.db import get_db
 from app.core.errors import ApiErrorResponse
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.dependencies_services import (
@@ -113,12 +115,15 @@ def verify_otp(
 )
 def refresh_tokens(
     payload: RefreshRequest,
+    db: Session = Depends(get_db),
     service: RefreshTokenService = Depends(get_refresh_token_service),
 ) -> RefreshResponse:
     """Rotate a refresh token and return a new token pair."""
     try:
         result = service.refresh(refresh_token=payload.refresh_token)
     except RefreshTokenError as exc:
+        if str(exc) == "refresh_reuse_detected":
+            db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": str(exc), "message": "Invalid refresh token"},

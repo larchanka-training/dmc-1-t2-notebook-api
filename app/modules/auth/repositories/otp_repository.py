@@ -48,6 +48,23 @@ class OtpRepository:
         )
         return self.db.execute(statement).scalar_one_or_none()
 
+    def get_latest_active_by_email_for_update(
+        self, email: str, now: datetime
+    ) -> Otp | None:
+        """Return and lock the newest active OTP for verification."""
+        statement = (
+            select(Otp)
+            .where(
+                Otp.email == email,
+                Otp.used_at.is_(None),
+                Otp.expires_at > now,
+            )
+            .order_by(Otp.expires_at.desc(), Otp.created_at.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        return self.db.execute(statement).scalar_one_or_none()
+
     def mark_active_as_used_for_email(self, email: str, used_at: datetime) -> int:
         """Mark all currently unused OTP rows for an email as used."""
         statement = (

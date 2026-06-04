@@ -66,13 +66,13 @@ class OtpVerifyService:
         """Verify an OTP and issue session tokens."""
         verified_at = self._normalize_datetime(now or datetime.now(UTC))
         normalized_email = self._code_service.normalize_email(email)
-        otp_row = self._otp_repository.get_latest_active_by_email(
+        otp_row = self._otp_repository.get_latest_active_by_email_for_update(
             normalized_email,
             verified_at,
         )
         if otp_row is None:
             raise OtpVerifyError("invalid_otp")
-        if not self._code_service.verify_secret(otp, otp_row.otp_hash):
+        if not self._code_service.verify_otp(otp, otp_row.otp_hash):
             raise OtpVerifyError("invalid_otp")
 
         self._otp_repository.mark_used(otp_row, verified_at)

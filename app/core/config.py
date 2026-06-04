@@ -14,6 +14,7 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEV_JWT_SECRET = "dev-only-jwt-secret-change-me-32-bytes-minimum"
+DEV_OTP_HASH_SECRET = "dev-only-otp-hash-secret-change-me-32-bytes"
 LOCAL_ENVS = {"dev", "local", "test"}
 PRODUCTION_ENVS = {"production", "prod", "staging"}
 
@@ -46,6 +47,7 @@ class Settings(BaseSettings):
     token_ttl_seconds: int = 86400
     session_ttl_seconds: int = 604800
     jwt_secret: str = DEV_JWT_SECRET
+    otp_hash_secret: str = DEV_OTP_HASH_SECRET
     jwt_access_ttl_seconds: int = 900
     jwt_refresh_ttl_seconds: int = 2_592_000
     otp_ttl_seconds: int = 300
@@ -107,6 +109,13 @@ class Settings(BaseSettings):
             if self.jwt_secret == DEV_JWT_SECRET or len(self.jwt_secret) < 32:
                 raise ValueError(
                     "JWT_SECRET must be set to a non-default value of at least 32 characters in production-like environments"
+                )
+            if (
+                self.otp_hash_secret == DEV_OTP_HASH_SECRET
+                or len(self.otp_hash_secret) < 32
+            ):
+                raise ValueError(
+                    "OTP_HASH_SECRET must be set to a non-default value of at least 32 characters in production-like environments"
                 )
             if self.allow_placeholder_auth:
                 raise ValueError(

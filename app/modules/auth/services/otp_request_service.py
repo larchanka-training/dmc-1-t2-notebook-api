@@ -47,7 +47,7 @@ class OtpRequestService:
         requested_at = self._normalize_datetime(now or datetime.now(UTC))
         normalized_email = self._code_service.normalize_email(email)
         raw_code = self._code_service.generate_otp()
-        otp_hash = self._code_service.hash_secret(raw_code)
+        otp_hash = self._code_service.hash_otp(raw_code)
         expires_at = requested_at + timedelta(seconds=self._config.otp_ttl_seconds)
 
         self._otp_repository.mark_active_as_used_for_email(

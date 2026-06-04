@@ -17,6 +17,7 @@ class CapturingEmailService:
 
 class StaticOtpCodeService(OtpCodeService):
     def __init__(self, code: str) -> None:
+        super().__init__()
         self._code = code
 
     def generate_otp(self) -> str:
@@ -45,7 +46,7 @@ def test_otp_request_service_creates_hash_and_sends_email(
     assert result.raw_code == "123456"
     assert result.otp.email == "user@example.com"
     assert result.otp.otp_hash != "123456"
-    assert code_service.verify_secret("123456", result.otp.otp_hash)
+    assert code_service.verify_otp("123456", result.otp.otp_hash)
     assert email_service.sent == [
         {
             "email": "user@example.com",
@@ -98,6 +99,7 @@ def test_otp_request_service_hides_raw_code_in_production_like_config(
             _env_file=None,
             app_env="production",
             jwt_secret="production-secret-value-at-least-32-chars",
+            otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
         ),
     )
 

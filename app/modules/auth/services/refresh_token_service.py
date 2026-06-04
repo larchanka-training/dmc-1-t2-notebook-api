@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.core.config import Settings, settings
+from app.core.logging import get_logger
 from app.modules.auth.models.auth_session import AuthSession
 from app.modules.auth.models.refresh_token import RefreshToken
 from app.modules.auth.repositories.refresh_token_repository import (
@@ -12,6 +13,8 @@ from app.modules.auth.repositories.refresh_token_repository import (
 from app.modules.auth.repositories.session_repository import AuthSessionRepository
 from app.modules.auth.services.otp_service import OtpCodeService
 from app.modules.auth.services.token_service import AccessTokenService
+
+logger = get_logger(__name__)
 
 
 class RefreshTokenError(ValueError):
@@ -71,8 +74,15 @@ class RefreshTokenService:
             self._refresh_token_repository.revoke_family(
                 token_row.family_id,
                 refreshed_at,
+                reuse_detected_at=refreshed_at,
             )
             self._session_repository.revoke(session, refreshed_at)
+            logger.warning(
+                "auth.refresh.reuse",
+                token_id=str(token_row.id),
+                session_id=str(session.id),
+                user_id=str(session.user_id),
+            )
             raise RefreshTokenError("refresh_reuse_detected")
 
         if session.revoked_at is not None:

@@ -76,15 +76,23 @@ class RefreshTokenRepository:
         self.db.flush()
         return token
 
-    def revoke_family(self, family_id: UUID, revoked_at: datetime) -> int:
+    def revoke_family(
+        self,
+        family_id: UUID,
+        revoked_at: datetime,
+        reuse_detected_at: datetime | None = None,
+    ) -> int:
         """Revoke all non-revoked tokens from a refresh-token family."""
+        values = {"revoked_at": revoked_at}
+        if reuse_detected_at is not None:
+            values["reuse_detected_at"] = reuse_detected_at
         statement = (
             update(RefreshToken)
             .where(
                 RefreshToken.family_id == family_id,
                 RefreshToken.revoked_at.is_(None),
             )
-            .values(revoked_at=revoked_at)
+            .values(**values)
         )
         result = self.db.execute(statement)
         self.db.flush()

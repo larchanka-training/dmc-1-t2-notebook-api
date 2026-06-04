@@ -114,6 +114,7 @@ POST /api/v1/auth/logout  → revoke session
 |---|---|
 | Algorithm | **HS256** |
 | Secret | `JWT_SECRET` (env, минимум 32 байта random) |
+| OTP hash secret | `OTP_HASH_SECRET` (env, минимум 32 байта random) |
 | Access TTL | **15 минут** |
 | Refresh TTL | **30 дней** |
 | Clock skew tolerance | 30 секунд |
@@ -173,7 +174,7 @@ Auth и user tables находятся в PostgreSQL-схеме `users`.
 |---|---|---|
 | `id` | `uuid` PK | |
 | `email` | `text` NOT NULL | Денормализация, чтобы выдавать OTP до создания user. |
-| `otp_hash` | `text` NOT NULL | Хеш OTP. Plain OTP не хранится. |
+| `otp_hash` | `text` NOT NULL | HMAC-SHA256 от OTP с server-side `OTP_HASH_SECRET` либо salted slow hash. Plain OTP не хранится. |
 | `expires_at` | `timestamptz` NOT NULL | now() + 5 минут. |
 | `used_at` | `timestamptz` NULL | NULL = ещё не использован. |
 | `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
@@ -373,7 +374,8 @@ reuse-detection через `refresh_tokens.rotated_at`/`revoked_at`/
 6. **Детект reuse:** если `token.rotated_at IS NOT NULL OR token.revoked_at IS NOT NULL`:
    - `UPDATE refresh_tokens SET revoked_at = now(), reuse_detected_at = now() WHERE family_id = token.family_id AND revoked_at IS NULL`.
    - `UPDATE sessions SET revoked_at = now() WHERE id = token.session_id`.
-   - Логируем security event (token_id, session_id, user_id, ip, user_agent).
+   - Логируем security event (token_id, session_id, user_id). Request metadata
+     (`ip`, `user_agent`) — future audit-boundary hardening.
    - Вернуть `401 refresh_reuse_detected`.
 7. Нормальный путь: сгенерировать новый refresh, вставить в `refresh_tokens`
    (`new_token` с тем же `family_id`, `rotated_at = NULL`, `revoked_at = NULL`).
@@ -751,6 +753,7 @@ VM) отдаёт nginx (`proxy/`), не backend-приложение. Измен
 |---|---|---|
 | `APP_ENV` | `dev` | `prod`, `dev`, `local`, `test`. Управляет поведением OTP-endpoint’а. |
 | `JWT_SECRET` | — (required) | Секрет для HS256. Минимум 32 байта random. |
+| `OTP_HASH_SECRET` | — (required) | Server-side секрет для HMAC-SHA256 OTP hash. Минимум 32 байта random. |
 | `JWT_ACCESS_TTL_SECONDS` | `900` | 15 минут. |
 | `JWT_REFRESH_TTL_SECONDS` | `2592000` | 30 дней. |
 | `OTP_TTL_SECONDS` | `300` | 5 минут. |

@@ -42,7 +42,7 @@ def test_otp_verify_service_creates_user_session_and_tokens(
     now = datetime(2026, 6, 3, 10, 0, tzinfo=UTC)
     otp_repo.create(
         email="user@example.com",
-        otp_hash=code_service.hash_secret("123456"),
+        otp_hash=code_service.hash_otp("123456"),
         created_at=now,
         expires_at=now + timedelta(minutes=5),
     )
@@ -82,7 +82,7 @@ def test_otp_verify_service_rejects_reused_otp(db_session: Session) -> None:
     now = datetime(2026, 6, 3, 10, 0, tzinfo=UTC)
     otp_repo.create(
         email="user@example.com",
-        otp_hash=code_service.hash_secret("123456"),
+        otp_hash=code_service.hash_otp("123456"),
         created_at=now,
         expires_at=now + timedelta(minutes=5),
     )
@@ -113,7 +113,7 @@ def test_otp_verify_service_rejects_wrong_otp_without_creating_session(
     now = datetime(2026, 6, 3, 10, 0, tzinfo=UTC)
     otp = otp_repo.create(
         email="user@example.com",
-        otp_hash=code_service.hash_secret("123456"),
+        otp_hash=code_service.hash_otp("123456"),
         created_at=now,
         expires_at=now + timedelta(minutes=5),
     )
