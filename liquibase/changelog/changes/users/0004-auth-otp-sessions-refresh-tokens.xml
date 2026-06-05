@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <changeSet id="users-0004-auth-otp-sessions-refresh-tokens" author="msd">
+        <comment>
+            TARDIS-75: add persistent storage for real OTP/JWT auth.
+            Stores OTP hashes, user sessions, and hashed refresh-token
+            history for rotation and reuse detection. Raw OTP values and
+            raw refresh tokens are never stored.
+        </comment>
+        <sql>
+            CREATE TABLE IF NOT EXISTS users.otps (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                email text NOT NULL,
+                otp_hash text NOT NULL,
+                expires_at timestamptz NOT NULL,
+                used_at timestamptz,
+                created_at timestamptz NOT NULL DEFAULT now()
+            );
+
+            CREATE INDEX IF NOT EXISTS otps_email_active_idx
+                ON users.otps(email, expires_at DESC)
+                WHERE used_at IS NULL;
+
+            CREATE TABLE IF NOT EXISTS users.sessions (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id uuid NOT NULL REFERENCES users.users(id) ON DELETE CASCADE,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                expires_at timestamptz NOT NULL,
+                revoked_at timestamptz
+            );
+
+            CREATE INDEX IF NOT EXISTS sessions_user_active_idx
+                ON users.sessions(user_id, expires_at DESC)
+                WHERE revoked_at IS NULL;
+
+            CREATE TABLE IF NOT EXISTS users.refresh_tokens (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                session_id uuid NOT NULL REFERENCES users.sessions(id) ON DELETE CASCADE,
+                token_hash text NOT NULL UNIQUE,
+                family_id uuid NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                expires_at timestamptz NOT NULL,
+                rotated_at timestamptz,
+                revoked_at timestamptz,
+                reuse_detected_at timestamptz
+            );
+
+            CREATE INDEX IF NOT EXISTS refresh_tokens_session_idx
+                ON users.refresh_tokens(session_id);
+
+            CREATE INDEX IF NOT EXISTS refresh_tokens_family_idx
+                ON users.refresh_tokens(family_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS refresh_tokens_active_idx
+                ON users.refresh_tokens(session_id, expires_at DESC)
+                WHERE revoked_at IS NULL AND rotated_at IS NULL;
+        </sql>
+
+        <rollback>
+            <sql>
+                DROP TABLE IF EXISTS users.refresh_tokens;
+                DROP TABLE IF EXISTS users.sessions;
+                DROP TABLE IF EXISTS users.otps;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

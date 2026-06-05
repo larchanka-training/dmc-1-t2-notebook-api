@@ -10,7 +10,13 @@ prod-ценная вещь (DB URL, OAuth-секрет, JSON-логи) долж�
 перекрыта переменной окружения при деплое.
 """
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEV_JWT_SECRET = "dev-only-jwt-secret-change-me-32-bytes-minimum"
+DEV_OTP_HASH_SECRET = "dev-only-otp-hash-secret-change-me-32-bytes"
+LOCAL_ENVS = {"dev", "local", "test"}
+PRODUCTION_ENVS = {"production", "prod", "staging"}
 
 
 class Settings(BaseSettings):
@@ -40,6 +46,14 @@ class Settings(BaseSettings):
     oauth_name_secret_key: str = "change-me"
     token_ttl_seconds: int = 86400
     session_ttl_seconds: int = 604800
+    jwt_secret: str = DEV_JWT_SECRET
+    otp_hash_secret: str = DEV_OTP_HASH_SECRET
+    jwt_access_ttl_seconds: int = 900
+    jwt_refresh_ttl_seconds: int = 2_592_000
+    otp_ttl_seconds: int = 300
+    otp_max_attempts: int = 5
+    otp_rate_limit_per_email: int = 3
+    allow_placeholder_auth: bool | None = None
     cors_allowed_origins: list[str] = [
         "http://localhost:5173",
         "http://notebook.com",
@@ -54,6 +68,60 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @property
+    def normalized_app_env(self) -> str:
+        """Return a normalized environment name."""
+        return self.app_env.strip().lower()
+
+    @property
+    def is_local_like(self) -> bool:
+        """Whether dev/local/test-only behavior is allowed."""
+        return self.normalized_app_env in LOCAL_ENVS
+
+    @property
+    def is_production_like(self) -> bool:
+        """Whether production-grade safety checks must be enforced."""
+        return self.normalized_app_env in PRODUCTION_ENVS
+
+    @property
+    def placeholder_auth_enabled(self) -> bool:
+        """Whether placeholder ``X-User-Id`` auth is enabled."""
+        if self.allow_placeholder_auth is not None:
+            return self.allow_placeholder_auth and self.is_local_like
+        return self.is_local_like
+
+    @model_validator(mode="after")
+    def validate_auth_settings(self) -> "Settings":
+        """Validate production-sensitive auth settings."""
+        if self.jwt_access_ttl_seconds <= 0:
+            raise ValueError("JWT_ACCESS_TTL_SECONDS must be positive")
+        if self.jwt_refresh_ttl_seconds <= 0:
+            raise ValueError("JWT_REFRESH_TTL_SECONDS must be positive")
+        if self.otp_ttl_seconds <= 0:
+            raise ValueError("OTP_TTL_SECONDS must be positive")
+        if self.otp_max_attempts <= 0:
+            raise ValueError("OTP_MAX_ATTEMPTS must be positive")
+        if self.otp_rate_limit_per_email <= 0:
+            raise ValueError("OTP_RATE_LIMIT_PER_EMAIL must be positive")
+
+        if self.is_production_like:
+            if self.jwt_secret == DEV_JWT_SECRET or len(self.jwt_secret) < 32:
+                raise ValueError(
+                    "JWT_SECRET must be set to a non-default value of at least 32 characters in production-like environments"
+                )
+            if (
+                self.otp_hash_secret == DEV_OTP_HASH_SECRET
+                or len(self.otp_hash_secret) < 32
+            ):
+                raise ValueError(
+                    "OTP_HASH_SECRET must be set to a non-default value of at least 32 characters in production-like environments"
+                )
+            if self.allow_placeholder_auth:
+                raise ValueError(
+                    "ALLOW_PLACEHOLDER_AUTH cannot be enabled in production-like environments"
+                )
+        return self
 
 
 settings = Settings()
