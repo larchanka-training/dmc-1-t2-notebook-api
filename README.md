@@ -17,7 +17,7 @@ backend domain boundary spec (TARDIS-31): PostgreSQL schemas `users` /
 - Health module with **liveness** (`/health`) and **readiness** (`/health/ready`) probes
 - Database layer scaffolding (SQLAlchemy 2, lazy engine, Liquibase changelogs)
 - Structured logging via `structlog` (JSON-ready)
-- Rich Swagger / OpenAPI documentation (`/docs`, `/redoc`, `/openapi.json`)
+- Rich Swagger / OpenAPI documentation (`/api/v1/docs`, `/api/v1/redoc`, `/api/v1/openapi.json`)
 - Automated version bumping driven by OpenAPI schema changes
 - Integration tests for app startup, routing and OpenAPI schema
 
@@ -104,9 +104,13 @@ backend domain boundary spec (TARDIS-31): PostgreSQL schemas `users` /
 
 API docs:
 
-- Swagger UI — `http://127.0.0.1:8000/docs`
-- ReDoc — `http://127.0.0.1:8000/redoc`
-- OpenAPI schema — `http://127.0.0.1:8000/openapi.json`
+- Swagger UI — `http://127.0.0.1:8000/api/v1/docs`
+- ReDoc — `http://127.0.0.1:8000/api/v1/redoc`
+- OpenAPI schema — `http://127.0.0.1:8000/api/v1/openapi.json`
+
+Docs/schema are served under the API prefix (`/api/v1`) so they remain
+reachable behind the CloudFront/ALB proxy, which forwards only `/api/v1/*`
+to the API.
 
 ## Health endpoints
 

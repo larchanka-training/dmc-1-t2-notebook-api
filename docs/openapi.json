@@ -629,7 +629,7 @@
       "name": "MSD Course",
       "url": "https://github.com/larchanka-training/dmc-1-t2-notebook-api"
     },
-    "description": "## JS Notebook API\n\nBackend API for the JS Notebook project. Built on a multi-module architecture: each domain module owns its `controllers`, `services` and `schemas`.\n\n**Documentation:**\n- Swagger UI: [`/docs`](/docs)\n- ReDoc: [`/redoc`](/redoc)\n- OpenAPI schema: [`/openapi.json`](/openapi.json)\n",
+    "description": "## JS Notebook API\n\nBackend API for the JS Notebook project. Built on a multi-module architecture: each domain module owns its `controllers`, `services` and `schemas`.\n\n**Documentation:**\n- Swagger UI: [`/api/v1/docs`](/api/v1/docs)\n- ReDoc: [`/api/v1/redoc`](/api/v1/redoc)\n- OpenAPI schema: [`/api/v1/openapi.json`](/api/v1/openapi.json)\n",
     "license": {
       "name": "MIT"
     },
