@@ -50,11 +50,11 @@
 - `POST /api/v1/auth/otp/request`;
 - `POST /api/v1/auth/otp/verify`;
 - `POST /api/v1/auth/refresh`;
+- `POST /api/v1/auth/logout`;
 - `api/docs/openapi.json` синхронизирован с этими endpoint’ами.
 
 Ещё не реализовано в этом срезе:
 
-- `POST /api/v1/auth/logout`;
 - Bearer-based `GET /api/v1/auth/me`;
 - Bearer cutover для notebook endpoints;
 - rate limiting / OTP attempt counter / cleanup jobs.
@@ -296,7 +296,7 @@ timestamps в FE/BE JSON-контрактах.
 
 **Errors:**
 - `400 invalid_email` — невалидный формат.
-- `422 validation_error` — body/schema validation error, в стандартном
+- `422 VALIDATION_ERROR` — body/schema validation error, в стандартном
   `ApiErrorResponse` envelope.
 
 `429 too_many_otp_requests` — целевое поведение после отдельной задачи по rate
@@ -331,7 +331,7 @@ limiting (§11); текущий TARDIS-75 срез его ещё не реали
 - `401 invalid_otp` — нет активного OTP, код не совпал, код истёк или уже был
   использован. Текущий backend не раскрывает отдельную причину в `error.code`,
   чтобы не усложнять первый MVP-срез.
-- `422 validation_error` — body/schema validation error, в стандартном
+- `422 VALIDATION_ERROR` — body/schema validation error, в стандартном
   `ApiErrorResponse` envelope.
 
 `otp_expired`, `otp_already_used` и per-OTP attempt counter — целевое
@@ -369,33 +369,33 @@ reuse-detection через `refresh_tokens.rotated_at`/`revoked_at`/
 1. `token = SELECT * FROM refresh_tokens WHERE token_hash = sha256($incoming)`.
 2. Если не найден — `401 invalid_refresh`. Ничего не пишем (неизвестно чьё).
 3. `session = SELECT * FROM sessions WHERE id = token.session_id`.
-4. Если `session.revoked_at IS NOT NULL` — `401 refresh_revoked` (сессия уже отозвана).
-5. Если `session.expires_at < now()` — `401 refresh_expired`.
-6. **Детект reuse:** если `token.rotated_at IS NOT NULL OR token.revoked_at IS NOT NULL`:
+4. Если `session` не найден — `401 invalid_refresh`.
+5. **Детект reuse:** если `token.rotated_at IS NOT NULL OR token.reuse_detected_at IS NOT NULL`:
    - `UPDATE refresh_tokens SET revoked_at = now(), reuse_detected_at = now() WHERE family_id = token.family_id AND revoked_at IS NULL`.
    - `UPDATE sessions SET revoked_at = now() WHERE id = token.session_id`.
    - Логируем security event (token_id, session_id, user_id). Request metadata
      (`ip`, `user_agent`) — future audit-boundary hardening.
    - Вернуть `401 refresh_reuse_detected`.
-7. Нормальный путь: сгенерировать новый refresh, вставить в `refresh_tokens`
+6. Если `token.revoked_at IS NOT NULL` без reuse marker — `401 refresh_revoked`
+   (например, logout уже отозвал эту session/family).
+7. Если `session.revoked_at IS NOT NULL` — `401 refresh_revoked` (сессия уже отозвана).
+8. Если `session.expires_at < now()` или `token.expires_at < now()` — `401 refresh_expired`.
+9. Нормальный путь: сгенерировать новый refresh, вставить в `refresh_tokens`
    (`new_token` с тем же `family_id`, `rotated_at = NULL`, `revoked_at = NULL`).
-8. `UPDATE refresh_tokens SET rotated_at = now() WHERE id = token.id`.
-9. Сгенерировать новый access JWT.
+10. `UPDATE refresh_tokens SET rotated_at = now() WHERE id = token.id`.
+11. Сгенерировать новый access JWT.
 
 **Errors:**
 - `401 invalid_refresh` — хеш не найден в `refresh_tokens`.
 - `401 refresh_revoked` — сессия уже отозвана (logout или предыдущий reuse-detection).
 - `401 refresh_expired` — сессия истекла.
 - `401 refresh_reuse_detected` — принесли уже ротированный токен. Атака или баг клиента (например сломался single-flight). Сессия отозвана, пользователю нужен повторный OTP-логин.
-- `422 validation_error` — body/schema validation error, в стандартном
+- `422 VALIDATION_ERROR` — body/schema validation error, в стандартном
   `ApiErrorResponse` envelope.
 
 **Что не делаем:** НЕ отзываем прочие сессии пользователя. False-positive выбесит людей с несколькими устройствами. Если реальная утечка затронула одно устройство — берём эту одну сессию. Для массовых инцидентов нужен отдельный admin-flow.
 
 ### 5.4. `POST /api/v1/auth/logout`
-
-> Target contract. Endpoint ещё не реализован в текущем TARDIS-75 OTP
-> request/verify срезе.
 
 **Headers:** `Authorization` НЕ требуется. Авторизация endpoint’а — по самому `refreshToken` (владение токеном → право его отозвать). Это позволяет отозвать сессию, даже когда access уже истёк — без вынужденного refresh-раунда.
 
@@ -411,7 +411,8 @@ reuse-detection через `refresh_tokens.rotated_at`/`revoked_at`/
 | Сценарий | Действие бэка | HTTP |
 |---|---|---|
 | Токен найден, family активна | Отзываем всё family + `sessions.revoked_at` | 204 |
-| Токен найден, но у него уже `rotated_at` или `revoked_at` | Идемпотентный no-op (legit кейсы: двойной logout, race с rotation). **НЕ** триггерим reuse-detection (§5.3) — это логаут, не refresh. | 204 |
+| Токен найден, сам токен уже `rotated_at`, но session ещё активна | Всё равно отзываем всю family + `sessions.revoked_at`. Владение старым токеном этой family достаточно для logout. **НЕ** триггерим reuse-detection (§5.3) — это логаут, не refresh. | 204 |
+| Токен найден, но session/family уже отозваны | Идемпотентный no-op (legit кейсы: двойной logout, повтор после reuse-detection). | 204 |
 | Токен не найден вовсе | No-op (возможно, мусор в боди или локальный stale буфер клиента) | 204 |
 
 **Side effects (путь «family активна»):**

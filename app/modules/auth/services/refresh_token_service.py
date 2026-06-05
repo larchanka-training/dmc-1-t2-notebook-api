@@ -66,7 +66,7 @@ class RefreshTokenService:
         if session is None:
             raise RefreshTokenError("invalid_refresh")
 
-        if token_row.rotated_at is not None or token_row.revoked_at is not None:
+        if token_row.rotated_at is not None or token_row.reuse_detected_at is not None:
             self._refresh_token_repository.mark_reuse_detected(
                 token_row,
                 refreshed_at,
@@ -84,6 +84,9 @@ class RefreshTokenService:
                 user_id=str(session.user_id),
             )
             raise RefreshTokenError("refresh_reuse_detected")
+
+        if token_row.revoked_at is not None:
+            raise RefreshTokenError("refresh_revoked")
 
         if session.revoked_at is not None:
             raise RefreshTokenError("refresh_revoked")

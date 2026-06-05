@@ -269,6 +269,20 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "LogoutRequest": {
+        "description": "Request body for idempotent refresh-token based logout.",
+        "properties": {
+          "refreshToken": {
+            "title": "Refreshtoken",
+            "type": "string"
+          }
+        },
+        "required": [
+          "refreshToken"
+        ],
+        "title": "LogoutRequest",
+        "type": "object"
+      },
       "NotebookCreate": {
         "description": "Request body for ``POST /notebooks``.\n\nОтличается от ``NotebookBase`` опциональным ``id``: если клиент\nего не присылает, сервер сгенерирует ``uuid4`` сам. Если присылает —\nсоздание становится идемпотентным (см. ``NotebookService.create``).",
         "properties": {
@@ -661,6 +675,41 @@
         "summary": "Service welcome message",
         "tags": [
           "Root"
+        ]
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "description": "Revoke the session identified by the refresh token.",
+        "operationId": "logout_api_v1_auth_logout_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Session revoked or already inactive"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Logout current refresh-token session",
+        "tags": [
+          "Auth"
         ]
       }
     },

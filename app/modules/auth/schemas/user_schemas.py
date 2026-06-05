@@ -70,3 +70,9 @@ class RefreshResponse(BaseModel):
 
     access_token: str
     refresh_token: str
+
+
+class LogoutRequest(BaseModel):
+    """Request body for idempotent refresh-token based logout."""
+
+    refresh_token: str = Field(..., alias="refreshToken")

@@ -7,12 +7,14 @@ from app.core.db import get_db
 from app.core.errors import ApiErrorResponse
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.dependencies_services import (
+    get_logout_service,
     get_refresh_token_service,
     get_otp_request_service,
     get_otp_verify_service,
 )
 from app.modules.auth.schemas.user_schemas import (
     CurrentUser,
+    LogoutRequest,
     OtpRequest,
     OtpRequestDevResponse,
     OtpVerifyRequest,
@@ -22,6 +24,7 @@ from app.modules.auth.schemas.user_schemas import (
 )
 from app.modules.auth.services import (
     InvalidEmailError,
+    LogoutService,
     OtpRequestService,
     OtpVerifyError,
     OtpVerifyService,
@@ -133,6 +136,24 @@ def refresh_tokens(
         access_token=result.access_token,
         refresh_token=result.refresh_token,
     )
+
+
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        204: {"description": "Session revoked or already inactive"},
+        422: {"model": ApiErrorResponse, "description": "Validation error"},
+    },
+    summary="Logout current refresh-token session",
+)
+def logout(
+    payload: LogoutRequest,
+    service: LogoutService = Depends(get_logout_service),
+) -> Response:
+    """Revoke the session identified by the refresh token."""
+    service.logout(refresh_token=payload.refresh_token)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(
