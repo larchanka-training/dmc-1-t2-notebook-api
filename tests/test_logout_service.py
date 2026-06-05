@@ -103,3 +103,49 @@ def test_logout_service_is_idempotent_for_already_revoked_token(
     assert first.revoked is True
     assert second.revoked is False
     assert second.session == session
+
+
+def test_logout_service_with_rotated_token_still_revokes_session(
+    db_session: Session,
+) -> None:
+    now = datetime(2026, 6, 5, 10, 0, tzinfo=UTC)
+    session_id, family_id = create_session_and_token(
+        db_session,
+        raw_refresh_token="old-refresh-token",
+        now=now,
+    )
+    code_service = OtpCodeService()
+    token_repo = RefreshTokenRepository(db_session)
+    old_token = token_repo.get_by_hash(
+        code_service.hash_secret("old-refresh-token"),
+    )
+    assert old_token is not None
+    token_repo.mark_rotated(old_token, now + timedelta(seconds=1))
+    token_repo.create(
+        session_id=session_id,
+        token_hash=code_service.hash_secret("new-refresh-token"),
+        family_id=family_id,
+        created_at=now + timedelta(seconds=1),
+        expires_at=now + timedelta(days=30),
+    )
+
+    service = build_service(db_session)
+    result = service.logout(
+        refresh_token="old-refresh-token",
+        now=now + timedelta(seconds=5),
+    )
+
+    session = AuthSessionRepository(db_session).get_by_id(session_id)
+    new_token = token_repo.get_by_hash(
+        code_service.hash_secret("new-refresh-token"),
+    )
+
+    assert result.revoked is True
+    assert session is not None
+    assert session.revoked_at == now + timedelta(seconds=5)
+    assert old_token.revoked_at == now + timedelta(seconds=5)
+    assert new_token is not None
+    assert new_token.revoked_at is not None
+    assert new_token.revoked_at.replace(tzinfo=UTC) == now + timedelta(seconds=5)
+    assert old_token.reuse_detected_at is None
+    assert new_token.reuse_detected_at is None
