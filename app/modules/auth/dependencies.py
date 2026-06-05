@@ -117,8 +117,9 @@ def get_current_user(
 
     Дополнительно сверяет, что сессия из ``sessionId``-claim ещё
     активна в БД (не отозвана через logout / reuse-detection / истёкший
-    срок) — иначе access-token, выпущенный до logout, продолжал бы
-    работать до ``exp``. См. ``api/docs/auth.md §6``.
+    срок) и принадлежит тому же пользователю, что ``sub``. Иначе
+    access-token, выпущенный до logout, продолжал бы работать до
+    ``exp``. См. ``api/docs/auth.md §6``.
 
     Args:
         credentials: ``Authorization: Bearer <token>`` (опционально —
@@ -131,7 +132,8 @@ def get_current_user(
     Raises:
         HTTPException: 401 с кодом ``invalid_token``, если токен
             отсутствует, не Bearer, не проходит проверку, сессия из
-            claim уже отозвана/истекла или пользователь не найден.
+            claim уже отозвана/истекла, принадлежит другому
+            пользователю или пользователь не найден.
     """
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
@@ -151,10 +153,13 @@ def get_current_user(
         claims.session_id,
         datetime.now(UTC),
     )
-    if active_session is None:
+    if active_session is None or active_session.user_id != claims.user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "invalid_token", "message": "Session is revoked or expired"},
+            detail={
+                "code": "invalid_token",
+                "message": "Session is revoked, expired, or mismatched",
+            },
         )
 
     user = UserRepository(db).get_by_id(claims.user_id)

@@ -5,9 +5,12 @@ its owner; a missing/malformed/tampered token returns ``401`` in the standard
 error envelope so the UI's single-flight refresh kicks in.
 """
 
+from uuid import UUID
+
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
+from app.modules.auth.services.token_service import AccessTokenService
 
 
 def _login(client: TestClient, email: str) -> dict:
@@ -62,6 +65,26 @@ def test_me_with_tampered_signature_returns_401(client: TestClient) -> None:
     response = client.get(
         f"{settings.api_prefix}/auth/me",
         headers={"Authorization": f"Bearer {tampered}"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_token"
+
+
+def test_me_rejects_token_with_mismatched_session_owner(
+    client: TestClient,
+) -> None:
+    alice = _login(client, "alice@example.com")
+    bob = _login(client, "bob@example.com")
+    bob_claims = AccessTokenService(settings).verify_access_token(bob["accessToken"])
+    mismatched_token = AccessTokenService(settings).issue_access_token(
+        user_id=UUID(alice["user"]["id"]),
+        session_id=bob_claims.session_id,
+    )
+
+    response = client.get(
+        f"{settings.api_prefix}/auth/me",
+        headers={"Authorization": f"Bearer {mismatched_token}"},
     )
 
     assert response.status_code == 401
