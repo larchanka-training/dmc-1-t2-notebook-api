@@ -369,20 +369,21 @@ reuse-detection через `refresh_tokens.rotated_at`/`revoked_at`/
 1. `token = SELECT * FROM refresh_tokens WHERE token_hash = sha256($incoming)`.
 2. Если не найден — `401 invalid_refresh`. Ничего не пишем (неизвестно чьё).
 3. `session = SELECT * FROM sessions WHERE id = token.session_id`.
-4. Если `session.revoked_at IS NOT NULL` — `401 refresh_revoked` (сессия уже отозвана).
-5. Если `session.expires_at < now()` — `401 refresh_expired`.
-6. **Детект reuse:** если `token.rotated_at IS NOT NULL OR token.reuse_detected_at IS NOT NULL`:
+4. Если `session` не найден — `401 invalid_refresh`.
+5. **Детект reuse:** если `token.rotated_at IS NOT NULL OR token.reuse_detected_at IS NOT NULL`:
    - `UPDATE refresh_tokens SET revoked_at = now(), reuse_detected_at = now() WHERE family_id = token.family_id AND revoked_at IS NULL`.
    - `UPDATE sessions SET revoked_at = now() WHERE id = token.session_id`.
    - Логируем security event (token_id, session_id, user_id). Request metadata
      (`ip`, `user_agent`) — future audit-boundary hardening.
    - Вернуть `401 refresh_reuse_detected`.
-7. Если `token.revoked_at IS NOT NULL` без reuse marker — `401 refresh_revoked`
+6. Если `token.revoked_at IS NOT NULL` без reuse marker — `401 refresh_revoked`
    (например, logout уже отозвал эту session/family).
-8. Нормальный путь: сгенерировать новый refresh, вставить в `refresh_tokens`
+7. Если `session.revoked_at IS NOT NULL` — `401 refresh_revoked` (сессия уже отозвана).
+8. Если `session.expires_at < now()` или `token.expires_at < now()` — `401 refresh_expired`.
+9. Нормальный путь: сгенерировать новый refresh, вставить в `refresh_tokens`
    (`new_token` с тем же `family_id`, `rotated_at = NULL`, `revoked_at = NULL`).
-9. `UPDATE refresh_tokens SET rotated_at = now() WHERE id = token.id`.
-10. Сгенерировать новый access JWT.
+10. `UPDATE refresh_tokens SET rotated_at = now() WHERE id = token.id`.
+11. Сгенерировать новый access JWT.
 
 **Errors:**
 - `401 invalid_refresh` — хеш не найден в `refresh_tokens`.
@@ -410,7 +411,8 @@ reuse-detection через `refresh_tokens.rotated_at`/`revoked_at`/
 | Сценарий | Действие бэка | HTTP |
 |---|---|---|
 | Токен найден, family активна | Отзываем всё family + `sessions.revoked_at` | 204 |
-| Токен найден, но у него уже `rotated_at` или `revoked_at` | Идемпотентный no-op (legit кейсы: двойной logout, race с rotation). **НЕ** триггерим reuse-detection (§5.3) — это логаут, не refresh. | 204 |
+| Токен найден, сам токен уже `rotated_at`, но session ещё активна | Всё равно отзываем всю family + `sessions.revoked_at`. Владение старым токеном этой family достаточно для logout. **НЕ** триггерим reuse-detection (§5.3) — это логаут, не refresh. | 204 |
+| Токен найден, но session/family уже отозваны | Идемпотентный no-op (legit кейсы: двойной logout, повтор после reuse-detection). | 204 |
 | Токен не найден вовсе | No-op (возможно, мусор в боди или локальный stale буфер клиента) | 204 |
 
 **Side effects (путь «family активна»):**

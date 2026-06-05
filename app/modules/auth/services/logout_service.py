@@ -14,7 +14,11 @@ from app.modules.auth.services.otp_service import OtpCodeService
 
 @dataclass(frozen=True)
 class LogoutResult:
-    """Result of an idempotent logout request."""
+    """Internal result of an idempotent logout request.
+
+    The HTTP controller always returns 204. These fields exist so service tests
+    can assert which storage rows were found and whether a live session changed.
+    """
 
     session: AuthSession | None
     refresh_token_row: RefreshToken | None
@@ -53,26 +57,19 @@ class LogoutService:
                 revoked=False,
             )
 
-        if token_row.rotated_at is not None or token_row.revoked_at is not None:
-            session = self._session_repository.get_by_id(token_row.session_id)
-            return LogoutResult(
-                session=session,
-                refresh_token_row=token_row,
-                revoked=False,
-            )
-
         session = self._session_repository.get_by_id(token_row.session_id)
-        self._refresh_token_repository.revoke_family(
-            token_row.family_id,
-            logged_out_at,
-        )
-        if session is not None and session.revoked_at is None:
+        session_was_active = session is not None and session.revoked_at is None
+        if session_was_active:
+            self._refresh_token_repository.revoke_family(
+                token_row.family_id,
+                logged_out_at,
+            )
             self._session_repository.revoke(session, logged_out_at)
 
         return LogoutResult(
             session=session,
             refresh_token_row=token_row,
-            revoked=True,
+            revoked=session_was_active,
         )
 
     def _normalize_datetime(self, value: datetime) -> datetime:

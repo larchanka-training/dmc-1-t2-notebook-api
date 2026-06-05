@@ -38,6 +38,34 @@ def test_logout_revokes_refresh_token_session(client: TestClient) -> None:
     assert refresh_response.json()["error"]["code"] == "refresh_revoked"
 
 
+def test_logout_with_rotated_refresh_token_revokes_current_refresh_token(
+    client: TestClient,
+) -> None:
+    auth_payload = request_and_verify_otp(client, "user@example.com")
+    old_refresh_token = str(auth_payload["refreshToken"])
+    rotate_response = client.post(
+        f"{settings.api_prefix}/auth/refresh",
+        json={"refreshToken": old_refresh_token},
+    )
+    assert rotate_response.status_code == 200
+    new_refresh_token = str(rotate_response.json()["refreshToken"])
+
+    logout_response = client.post(
+        f"{settings.api_prefix}/auth/logout",
+        json={"refreshToken": old_refresh_token},
+    )
+
+    assert logout_response.status_code == 204
+
+    refresh_response = client.post(
+        f"{settings.api_prefix}/auth/refresh",
+        json={"refreshToken": new_refresh_token},
+    )
+
+    assert refresh_response.status_code == 401
+    assert refresh_response.json()["error"]["code"] == "refresh_revoked"
+
+
 def test_logout_is_idempotent_for_unknown_or_repeated_token(
     client: TestClient,
 ) -> None:
