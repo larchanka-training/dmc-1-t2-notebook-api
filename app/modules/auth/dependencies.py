@@ -1,15 +1,19 @@
 """FastAPI dependencies for resolving the current user.
 
 Здесь живёт ``get_current_user`` — самая «горячая» dependency: каждый
-защищённый роут получает текущего пользователя через неё. До появления
-настоящего OTP/JWT мы используем placeholder-схему: клиент шлёт
-``X-User-Id`` (заголовок), сервер по нему достаёт или создаёт запись.
+защищённый роут получает текущего пользователя через неё. Реализация —
+Bearer JWT (HS256 access token, выпущенный ``POST /auth/otp/verify``
+или ``/auth/refresh``) плюс проверка, что соответствующая
+``users.sessions`` не отозвана и не истекла.
 
-Важно: placeholder работает **только** в dev/test/local. В prod/staging
-зависимость возвращает 501, чтобы случайно не выпустить «open access»
-в боевое окружение (см. Шаг 2 разбора PR #29).
+Для локальной разработки и тестов рядом живёт ``get_placeholder_user``
+— старая X-User-Id схема. Она доступна **только** в dev/test/local
+(``settings.placeholder_auth_enabled``); в prod-like окружениях
+возвращает 501. Используется как удобный shortcut, когда не нужно
+гонять OTP-flow, а не как продакшн-механизм авторизации.
 """
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
@@ -18,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.db import get_db
+from app.modules.auth.repositories.session_repository import AuthSessionRepository
 from app.modules.auth.repositories.user_repository import UserRepository
 from app.modules.auth.schemas.user_schemas import CurrentUser
 from app.modules.auth.services.token_service import AccessTokenError, AccessTokenService
@@ -34,7 +39,7 @@ DEV_USER = CurrentUser(
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def get_current_user(
+def get_placeholder_user(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     db: Session = Depends(get_db),
 ) -> CurrentUser:
@@ -97,18 +102,23 @@ def get_current_user(
     )
 
 
-def get_authenticated_user(
+def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     db: Session = Depends(get_db),
 ) -> CurrentUser:
     """Resolve the current user from a Bearer JWT access token.
 
-    Настоящая авторизация: проверяет подпись и срок HS256-токена,
-    выданного ``POST /auth/verify``/``/auth/refresh``, и достаёт по
-    ``sub`` пользователя из БД. В отличие от placeholder-схемы
-    (:func:`get_current_user`), валидирует токен фронта и отдаёт
-    ``401`` при его отсутствии/порче/истечении — это включает на
-    фронте single-flight refresh и восстановление сессии.
+    Каноническая авторизация для всех защищённых endpoint'ов: проверяет
+    подпись и срок HS256-токена, выданного ``POST /auth/otp/verify``
+    или ``/auth/refresh``, и достаёт по ``sub`` пользователя из БД.
+    Отдаёт ``401`` при отсутствии токена, порче подписи или истечении —
+    это включает на фронте single-flight refresh и восстановление
+    сессии.
+
+    Дополнительно сверяет, что сессия из ``sessionId``-claim ещё
+    активна в БД (не отозвана через logout / reuse-detection / истёкший
+    срок) — иначе access-token, выпущенный до logout, продолжал бы
+    работать до ``exp``. См. ``api/docs/auth.md §6``.
 
     Args:
         credentials: ``Authorization: Bearer <token>`` (опционально —
@@ -120,8 +130,8 @@ def get_authenticated_user(
 
     Raises:
         HTTPException: 401 с кодом ``invalid_token``, если токен
-            отсутствует, не Bearer, не проходит проверку или
-            пользователь не найден.
+            отсутствует, не Bearer, не проходит проверку, сессия из
+            claim уже отозвана/истекла или пользователь не найден.
     """
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
@@ -136,6 +146,16 @@ def get_authenticated_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "invalid_token", "message": "Invalid or expired access token"},
         ) from exc
+
+    active_session = AuthSessionRepository(db).get_active_by_id(
+        claims.session_id,
+        datetime.now(UTC),
+    )
+    if active_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "invalid_token", "message": "Session is revoked or expired"},
+        )
 
     user = UserRepository(db).get_by_id(claims.user_id)
     if user is None:
