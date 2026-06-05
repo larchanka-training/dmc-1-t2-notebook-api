@@ -58,9 +58,10 @@ app = FastAPI(
         "architecture: each domain module owns its `controllers`, "
         "`services` and `schemas`.\n\n"
         "**Documentation:**\n"
-        "- Swagger UI: [`/docs`](/docs)\n"
-        "- ReDoc: [`/redoc`](/redoc)\n"
-        "- OpenAPI schema: [`/openapi.json`](/openapi.json)\n"
+        f"- Swagger UI: [`{settings.api_prefix}/docs`]({settings.api_prefix}/docs)\n"
+        f"- ReDoc: [`{settings.api_prefix}/redoc`]({settings.api_prefix}/redoc)\n"
+        f"- OpenAPI schema: [`{settings.api_prefix}/openapi.json`]"
+        f"({settings.api_prefix}/openapi.json)\n"
     ),
     openapi_tags=tags_metadata,
     contact={
@@ -68,9 +69,14 @@ app = FastAPI(
         "url": "https://github.com/larchanka-training/dmc-1-t2-notebook-api",
     },
     license_info={"name": "MIT"},
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
+    # Docs/schema are served under the same prefix as the routers so they are
+    # reachable behind the CloudFront/ALB proxy, which forwards only
+    # `/api/v1/*` to the API (root `/docs` would hit the SPA on S3). The proxy
+    # does not strip the prefix, so `root_path` is intentionally not used —
+    # it would double-prefix the already-prefixed routes in "Try it out".
+    docs_url=f"{settings.api_prefix}/docs",
+    redoc_url=f"{settings.api_prefix}/redoc",
+    openapi_url=f"{settings.api_prefix}/openapi.json",
 )
 
 install_error_handlers(app)

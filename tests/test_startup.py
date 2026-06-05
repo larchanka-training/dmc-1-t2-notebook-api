@@ -44,11 +44,21 @@ def test_root_endpoint(client: TestClient) -> None:
 
 
 def test_openapi_schema_available(client: TestClient) -> None:
-    response = client.get("/openapi.json")
+    # Docs/schema live under the API prefix so they survive the CloudFront/ALB
+    # proxy, which forwards only `{api_prefix}/*` to the API.
+    response = client.get(f"{settings.api_prefix}/openapi.json")
     assert response.status_code == 200
     schema = response.json()
     assert schema["info"]["title"] == settings.app_name
     assert schema["info"]["version"] == settings.app_version
+
+
+def test_docs_served_under_prefix_not_root(client: TestClient) -> None:
+    assert client.get(f"{settings.api_prefix}/docs").status_code == 200
+    assert client.get(f"{settings.api_prefix}/redoc").status_code == 200
+    # Root paths must not serve docs/schema — those would reach the SPA on S3.
+    assert client.get("/docs").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
 
 
 def test_readiness_ok_with_mocked_db(client: TestClient) -> None:
