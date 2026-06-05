@@ -13,12 +13,14 @@
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.db import get_db
 from app.modules.auth.repositories.user_repository import UserRepository
 from app.modules.auth.schemas.user_schemas import CurrentUser
+from app.modules.auth.services.token_service import AccessTokenError, AccessTokenService
 
 DEV_USER = CurrentUser(
     id=UUID("00000000-0000-0000-0000-000000000001"),
@@ -26,6 +28,10 @@ DEV_USER = CurrentUser(
     display_name="Dev User",
     roles=[],
 )
+
+# auto_error=False: we raise our own 401 in the standard error envelope instead
+# of FastAPI's default {"detail": "Not authenticated"} shape.
+_bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def get_current_user(
@@ -83,6 +89,61 @@ def get_current_user(
         user_id,
         f"{user_id}@dev.notebook.local",
     )
+    return CurrentUser(
+        id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        roles=[],
+    )
+
+
+def get_authenticated_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    db: Session = Depends(get_db),
+) -> CurrentUser:
+    """Resolve the current user from a Bearer JWT access token.
+
+    Настоящая авторизация: проверяет подпись и срок HS256-токена,
+    выданного ``POST /auth/verify``/``/auth/refresh``, и достаёт по
+    ``sub`` пользователя из БД. В отличие от placeholder-схемы
+    (:func:`get_current_user`), валидирует токен фронта и отдаёт
+    ``401`` при его отсутствии/порче/истечении — это включает на
+    фронте single-flight refresh и восстановление сессии.
+
+    Args:
+        credentials: ``Authorization: Bearer <token>`` (опционально —
+            ``auto_error=False``, чтобы отдавать единый error-envelope).
+        db: SQLAlchemy-сессия из :func:`get_db`.
+
+    Returns:
+        :class:`CurrentUser` владельца токена.
+
+    Raises:
+        HTTPException: 401 с кодом ``invalid_token``, если токен
+            отсутствует, не Bearer, не проходит проверку или
+            пользователь не найден.
+    """
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "invalid_token", "message": "Missing bearer token"},
+        )
+
+    try:
+        claims = AccessTokenService(settings).verify_access_token(credentials.credentials)
+    except AccessTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "invalid_token", "message": "Invalid or expired access token"},
+        ) from exc
+
+    user = UserRepository(db).get_by_id(claims.user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "invalid_token", "message": "User not found"},
+        )
+
     return CurrentUser(
         id=user.id,
         email=user.email,

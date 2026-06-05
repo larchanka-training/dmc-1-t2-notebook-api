@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.errors import ApiErrorResponse
-from app.modules.auth.dependencies import get_current_user
+from app.modules.auth.dependencies import get_authenticated_user
 from app.modules.auth.dependencies_services import (
     get_logout_service,
     get_refresh_token_service,
@@ -159,18 +159,21 @@ def logout(
 @router.get(
     "/me",
     response_model=CurrentUser,
+    responses={
+        401: {"model": ApiErrorResponse, "description": "Missing or invalid access token"},
+    },
     summary="Get current user",
-    description="Returns the current placeholder user for local development.",
+    description="Returns the user owning the Bearer access token.",
 )
-def get_me(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
-    """Return the authenticated user resolved by the dependency.
+def get_me(current_user: CurrentUser = Depends(get_authenticated_user)) -> CurrentUser:
+    """Return the user resolved from the Bearer JWT access token.
 
-    Эндпоинт-маркер: используется фронтом, чтобы убедиться, что
-    заголовок ``X-User-Id`` валиден и сервер согласен с этим
-    пользователем. В будущем заменится реальной /me на базе JWT.
+    Используется фронтом при загрузке/перезагрузке для восстановления
+    сессии: валидный токен → текущий пользователь; отсутствующий или
+    просроченный → ``401``, что запускает single-flight refresh.
 
     Args:
-        current_user: Внедряется ``Depends(get_current_user)``.
+        current_user: Внедряется ``Depends(get_authenticated_user)``.
 
     Returns:
         Тот же :class:`CurrentUser`, без модификаций.

@@ -1,55 +1,49 @@
+"""Unit tests for the dev placeholder auth dependency.
+
+``get_current_user`` (the ``X-User-Id`` placeholder) no longer backs
+``GET /auth/me`` — that route now validates a Bearer JWT (see
+``test_auth_me_jwt.py``). The placeholder still backs the notebooks routes,
+so it is exercised here directly and end-to-end in ``test_notebooks_api.py``.
+"""
+
 from uuid import uuid4
 
 import pytest
-from fastapi.testclient import TestClient
+from fastapi import HTTPException
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.modules.auth.dependencies import DEV_USER, get_current_user
 
 
-def test_get_me_returns_dev_user_without_header(client: TestClient) -> None:
-    response = client.get(f"{settings.api_prefix}/auth/me")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "id": "00000000-0000-0000-0000-000000000001",
-        "email": "dev@notebook.local",
-        "displayName": "Dev User",
-        "roles": [],
-    }
+def test_placeholder_returns_dev_user_without_header(db_session: Session) -> None:
+    assert get_current_user(x_user_id=None, db=db_session) == DEV_USER
 
 
-def test_get_me_uses_x_user_id_header(client: TestClient) -> None:
+def test_placeholder_resolves_x_user_id(db_session: Session) -> None:
     user_id = uuid4()
 
-    response = client.get(
-        f"{settings.api_prefix}/auth/me",
-        headers={"X-User-Id": str(user_id)},
-    )
+    user = get_current_user(x_user_id=str(user_id), db=db_session)
 
-    assert response.status_code == 200
-    assert response.json()["id"] == str(user_id)
-    assert response.json()["email"] == f"{user_id}@dev.notebook.local"
+    assert str(user.id) == str(user_id)
+    assert user.email == f"{user_id}@dev.notebook.local"
 
 
-def test_get_me_rejects_invalid_x_user_id(client: TestClient) -> None:
-    response = client.get(
-        f"{settings.api_prefix}/auth/me",
-        headers={"X-User-Id": "bad"},
-    )
+def test_placeholder_rejects_invalid_x_user_id(db_session: Session) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        get_current_user(x_user_id="bad", db=db_session)
 
-    assert response.status_code == 401
-    assert response.json()["error"]["code"] == "UNAUTHORIZED"
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail["code"] == "UNAUTHORIZED"
 
 
-def test_placeholder_auth_rejected_in_production(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+def test_placeholder_disabled_in_production(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(settings, "app_env", "production")
 
-    response = client.get(
-        f"{settings.api_prefix}/auth/me",
-        headers={"X-User-Id": "11111111-1111-1111-1111-111111111111"},
-    )
+    with pytest.raises(HTTPException) as exc_info:
+        get_current_user(x_user_id=None, db=db_session)
 
-    assert response.status_code == 501
-    assert response.json()["error"]["code"] == "AUTH_NOT_IMPLEMENTED"
+    assert exc_info.value.status_code == 501
+    assert exc_info.value.detail["code"] == "AUTH_NOT_IMPLEMENTED"

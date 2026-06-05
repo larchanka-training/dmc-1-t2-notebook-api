@@ -7,9 +7,9 @@
 > реализован placeholder auth:
 > `CurrentUser`, `get_current_user`, dev/test/local `X-User-Id`,
 > `DEV_USER` fallback и `GET /api/v1/auth/me`. В TARDIS-75 уже добавлены
-> auth storage, OTP request/verify endpoints, access-token issuing and
-> refresh-token rotation. Logout and Bearer cutover для
-> `/auth/me`/notebook endpoints остаются следующими шагами.
+> auth storage, OTP request/verify endpoints, access-token issuing,
+> refresh-token rotation и Bearer-based `GET /api/v1/auth/me`. Logout и
+> Bearer cutover для notebook endpoints остаются следующими шагами.
 
 ## Содержание
 
@@ -50,12 +50,12 @@
 - `POST /api/v1/auth/otp/request`;
 - `POST /api/v1/auth/otp/verify`;
 - `POST /api/v1/auth/refresh`;
+- Bearer-based `GET /api/v1/auth/me` (валидирует JWT access token);
 - `POST /api/v1/auth/logout`;
 - `api/docs/openapi.json` синхронизирован с этими endpoint’ами.
 
 Ещё не реализовано в этом срезе:
 
-- Bearer-based `GET /api/v1/auth/me`;
 - Bearer cutover для notebook endpoints;
 - rate limiting / OTP attempt counter / cleanup jobs.
 
@@ -428,22 +428,18 @@ reuse-detection через `refresh_tokens.rotated_at`/`revoked_at`/
 
 ### 5.5. `GET /api/v1/auth/me`
 
-> Current state: placeholder endpoint. Bearer-based cutover ещё не реализован.
+> Current state: Bearer-based. Валидирует JWT access token (см. §3) и
+> возвращает его владельца. `X-User-Id` этим endpoint’ом больше не
+> принимается — placeholder остаётся только на notebook endpoints до их
+> Bearer cutover (см. §7.4).
 
-**Headers:** в placeholder-режиме можно не передавать заголовки. Для dev/test
-можно передать `X-User-Id: <uuid>`. В real-auth режиме будет
-`Authorization: Bearer <access>`.
+**Headers:** `Authorization: Bearer <access>` — обязателен.
 
-Placeholder-режим включён только для `dev`/`test` окружений. В `production` и
-`staging` backend не принимает `X-User-Id` как источник identity и возвращает
-ошибку до появления real-auth реализации.
-
-В `dev`/`test` валидный `X-User-Id`, которого ещё нет в `users.users`, создаёт
-dev-only placeholder user row. DB-уровневого FK на `users.users` у
-`notebooks.owner_id` больше нет (см. `api/docs/domain-boundaries.md` §4),
-но invariant «owner существует до записи в notebooks» поддерживается на
-уровне приложения, и placeholder материализует пользователя на первом
-запросе с новым `X-User-Id`.
+Сервер проверяет подпись и срок access-токена и достаёт пользователя по
+claim `sub`. Отсутствие заголовка, неверная схема, битая подпись,
+просроченный токен или несуществующий пользователь → `401` с кодом
+`invalid_token`. Поведение одинаково во всех окружениях (placeholder здесь
+не участвует).
 
 **Response 200:**
 ```json
