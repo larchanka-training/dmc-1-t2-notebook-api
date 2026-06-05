@@ -12,6 +12,7 @@ from app.modules.auth.repositories import (
     UserRepository,
 )
 from app.modules.auth.services import (
+    LogoutService,
     OtpRequestService,
     OtpVerifyService,
     RefreshTokenService,
@@ -45,4 +46,12 @@ def get_refresh_token_service(db: Session = Depends(get_db)) -> RefreshTokenServ
         session_repository=AuthSessionRepository(db),
         refresh_token_repository=RefreshTokenRepository(db),
         config=settings,
+    )
+
+
+def get_logout_service(db: Session = Depends(get_db)) -> LogoutService:
+    """Build the refresh-token based logout service for the current request."""
+    return LogoutService(
+        session_repository=AuthSessionRepository(db),
+        refresh_token_repository=RefreshTokenRepository(db),
     )
