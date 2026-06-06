@@ -131,23 +131,48 @@ Response envelope (`HealthResponse`):
 }
 ```
 
-## Placeholder auth and notebooks
+## Auth and notebooks
 
-Issue #73 adds a dev-only placeholder user context and owner-scoped Notebook API.
-Real OTP/JWT auth is a follow-up; during local development the API falls back to
-the seeded dev user unless `X-User-Id` is provided.
-When a valid `X-User-Id` does not exist yet, the placeholder dependency creates
-a dev-only user row in `users.users` so the application-level
-"owner exists before notebook is created" invariant holds. There is no
-DB-level FK from `notebooks.notebooks.owner_id` — see
+TARDIS-75 implements passwordless email OTP auth:
+
+1. `POST /api/v1/auth/otp/request` sends or, in local/dev/test, returns a
+   one-time code.
+2. `POST /api/v1/auth/otp/verify` creates or reuses the `users.users` row,
+   opens an auth session, and returns a short-lived Bearer access token plus
+   an opaque refresh token.
+3. `POST /api/v1/auth/refresh` rotates the refresh token and issues a new
+   access token.
+4. `POST /api/v1/auth/logout` revokes the refresh-token family and session.
+
+`GET /api/v1/auth/me` and all `/api/v1/notebooks[...]` endpoints require:
+
+```text
+Authorization: Bearer <accessToken>
+```
+
+The access token is accepted only while its `sessionId` points to an active
+`users.sessions` row for the same user. After logout or refresh-token reuse
+detection, the same not-yet-expired access token returns `401 invalid_token`.
+
+The old `X-User-Id` placeholder path remains only as a dev/test helper through
+`get_placeholder_user`; it is not wired to production notebook endpoints.
+There is no DB-level FK from `notebooks.notebooks.owner_id` — see
 [`docs/domain-boundaries.md`](docs/domain-boundaries.md) §4.
 
 ```bash
-curl http://127.0.0.1:8000/api/v1/auth/me
-curl http://127.0.0.1:8000/api/v1/auth/me -H 'X-User-Id: 11111111-1111-1111-1111-111111111111'
+curl -X POST http://127.0.0.1:8000/api/v1/auth/otp/request \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@example.com"}'
+
+curl -X POST http://127.0.0.1:8000/api/v1/auth/otp/verify \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@example.com","otp":"123456"}'
+
+curl http://127.0.0.1:8000/api/v1/auth/me \
+  -H 'Authorization: Bearer <accessToken>'
 ```
 
-Placeholder response:
+Current-user response:
 
 ```json
 {

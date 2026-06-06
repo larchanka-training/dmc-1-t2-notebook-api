@@ -114,7 +114,10 @@ POST /api/v1/auth/logout  → revoke session
 - **Refresh rotation.** При `POST /api/v1/auth/refresh` старый токен помечается `rotated_at`, новый токен создаётся в той же `family_id`.
 - **Прочие сессии пользователя не отзываются** при refresh-token reuse одной сессии.
 - **Logout — серверный.** Помечает `sessions.revoked_at`. Любая последующая попытка refresh с этим токеном → 401.
-- **Access не отзывается.** При logout фронт сразу выкидывает access из памяти, но любой in-flight запрос с этим access успешно отработает до его `exp`. Это осознанный trade-off в пользу простоты и performance (никаких blocklist-проверок на каждый запрос).
+- **Access проверяется на каждом защищённом запросе.** Сервер валидирует подпись
+  и `exp`, затем сверяет, что `sessionId` из access-token указывает на активную
+  `users.sessions` того же пользователя. После logout / reuse-detection
+  даже ещё не истёкший access получает `401 invalid_token`.
 
 ---
 
@@ -141,7 +144,9 @@ POST /api/v1/auth/logout  → revoke session
 ```
 
 - `sub` — id пользователя.
-- `sessionId` — id записи в `sessions`. Используется для аудита, не для проверки отзыва на каждом запросе.
+- `sessionId` — id записи в `sessions`. Используется не только для аудита, но и
+  как часть runtime authorization check: protected endpoints принимают access
+  только если эта сессия активна и принадлежит пользователю из `sub`.
 - `iat`, `exp` — стандарт.
 
 ### 3.2. Refresh token

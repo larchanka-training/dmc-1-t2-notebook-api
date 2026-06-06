@@ -119,7 +119,7 @@ def get_current_user(
     активна в БД (не отозвана через logout / reuse-detection / истёкший
     срок) и принадлежит тому же пользователю, что ``sub``. Иначе
     access-token, выпущенный до logout, продолжал бы работать до
-    ``exp``. См. ``api/docs/auth.md §6``.
+    ``exp``. См. ``api/docs/auth.md §5.5`` и ``§7.4``.
 
     Args:
         credentials: ``Authorization: Bearer <token>`` (опционально —
