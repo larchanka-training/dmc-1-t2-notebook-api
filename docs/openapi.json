@@ -1055,22 +1055,6 @@
               "title": "Order",
               "type": "string"
             }
-          },
-          {
-            "in": "header",
-            "name": "X-User-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-User-Id"
-            }
           }
         ],
         "responses": {
@@ -1084,6 +1068,16 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1095,6 +1089,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "List notebooks",
         "tags": [
           "Notebooks"
@@ -1103,24 +1102,6 @@
       "post": {
         "description": "``POST /notebooks`` — create or idempotently return a notebook.\n\nВозвращает 201 при создании, 200 при идемпотентном повторе,\n409 при идемпотентном повторе с другим содержимым. Подробности —\nв :meth:`NotebookService.create`.\n\nArgs:\n    payload: Тело запроса с ``id`` (опционально), ``title``, ``cells``.\n    response: FastAPI-объект ответа (нужен, чтобы понизить статус\n        с 201 до 200 при идемпотентном попадании).\n    current_user: Авторизованный пользователь.\n    service: DI-инстанс сервиса.\n\nReturns:\n    Созданный или существующий ноутбук.",
         "operationId": "create_notebook_api_v1_notebooks_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "X-User-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-User-Id"
-            }
-          }
-        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1152,6 +1133,16 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -1173,6 +1164,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Create notebook",
         "tags": [
           "Notebooks"
@@ -1193,27 +1189,21 @@
               "title": "Notebook Id",
               "type": "string"
             }
-          },
-          {
-            "in": "header",
-            "name": "X-User-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-User-Id"
-            }
           }
         ],
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
           },
           "422": {
             "content": {
@@ -1226,6 +1216,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Delete notebook",
         "tags": [
           "Notebooks"
@@ -1244,22 +1239,6 @@
               "title": "Notebook Id",
               "type": "string"
             }
-          },
-          {
-            "in": "header",
-            "name": "X-User-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-User-Id"
-            }
           }
         ],
         "responses": {
@@ -1273,6 +1252,16 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1284,6 +1273,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Get notebook",
         "tags": [
           "Notebooks"
@@ -1301,22 +1295,6 @@
               "format": "uuid",
               "title": "Notebook Id",
               "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-User-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-User-Id"
             }
           }
         ],
@@ -1341,6 +1319,16 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1352,6 +1340,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Patch notebook",
         "tags": [
           "Notebooks"
@@ -1369,7 +1362,7 @@
       "name": "Health"
     },
     {
-      "description": "Placeholder current-user endpoint for local development.",
+      "description": "Email OTP sign-in, Bearer current-user restoration, refresh-token rotation, and logout endpoints.",
       "name": "Auth"
     },
     {

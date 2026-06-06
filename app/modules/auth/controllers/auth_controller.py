@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.errors import ApiErrorResponse
-from app.modules.auth.dependencies import get_authenticated_user
+from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.dependencies_services import (
     get_logout_service,
     get_refresh_token_service,
@@ -165,7 +165,7 @@ def logout(
     summary="Get current user",
     description="Returns the user owning the Bearer access token.",
 )
-def get_me(current_user: CurrentUser = Depends(get_authenticated_user)) -> CurrentUser:
+def get_me(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
     """Return the user resolved from the Bearer JWT access token.
 
     Используется фронтом при загрузке/перезагрузке для восстановления
@@ -173,7 +173,7 @@ def get_me(current_user: CurrentUser = Depends(get_authenticated_user)) -> Curre
     просроченный → ``401``, что запускает single-flight refresh.
 
     Args:
-        current_user: Внедряется ``Depends(get_authenticated_user)``.
+        current_user: Внедряется ``Depends(get_current_user)``.
 
     Returns:
         Тот же :class:`CurrentUser`, без модификаций.

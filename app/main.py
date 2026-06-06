@@ -40,7 +40,10 @@ tags_metadata = [
     },
     {
         "name": "Auth",
-        "description": "Placeholder current-user endpoint for local development.",
+        "description": (
+            "Email OTP sign-in, Bearer current-user restoration, "
+            "refresh-token rotation, and logout endpoints."
+        ),
     },
     {
         "name": "Notebooks",

@@ -33,6 +33,10 @@ router = APIRouter(prefix="/notebooks", tags=["Notebooks"])
             "model": NotebookResponse,
             "description": "Notebook already existed for this owner",
         },
+        401: {
+            "model": ApiErrorResponse,
+            "description": "Missing or invalid access token",
+        },
         409: {
             "model": ApiErrorResponse,
             "description": "Notebook id already exists with different content",
@@ -71,6 +75,12 @@ def create_notebook(
 @router.get(
     "",
     response_model=NotebookListResponse,
+    responses={
+        401: {
+            "model": ApiErrorResponse,
+            "description": "Missing or invalid access token",
+        },
+    },
     summary="List notebooks",
 )
 def list_notebooks(
@@ -103,6 +113,12 @@ def list_notebooks(
 @router.get(
     "/{notebook_id}",
     response_model=NotebookResponse,
+    responses={
+        401: {
+            "model": ApiErrorResponse,
+            "description": "Missing or invalid access token",
+        },
+    },
     summary="Get notebook",
 )
 def get_notebook(
@@ -126,6 +142,12 @@ def get_notebook(
 @router.patch(
     "/{notebook_id}",
     response_model=NotebookResponse,
+    responses={
+        401: {
+            "model": ApiErrorResponse,
+            "description": "Missing or invalid access token",
+        },
+    },
     summary="Patch notebook",
 )
 def patch_notebook(
@@ -154,6 +176,12 @@ def patch_notebook(
 @router.delete(
     "/{notebook_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        401: {
+            "model": ApiErrorResponse,
+            "description": "Missing or invalid access token",
+        },
+    },
     summary="Delete notebook",
 )
 def delete_notebook(
