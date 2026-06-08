@@ -192,6 +192,112 @@
         "title": "CurrentUser",
         "type": "object"
       },
+      "GenerateRequest": {
+        "description": "Request body for ``POST /llm/generate``.",
+        "properties": {
+          "baseCode": {
+            "anyOf": [
+              {
+                "maxLength": 8000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basecode"
+          },
+          "context": {
+            "items": {
+              "$ref": "#/components/schemas/LlmContextCell"
+            },
+            "maxItems": 10,
+            "title": "Context",
+            "type": "array"
+          },
+          "language": {
+            "default": "javascript",
+            "enum": [
+              "javascript",
+              "typescript"
+            ],
+            "title": "Language",
+            "type": "string"
+          },
+          "mode": {
+            "default": "generate",
+            "enum": [
+              "generate",
+              "edit"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "notebookTitle": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notebooktitle"
+          },
+          "prompt": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "title": "GenerateRequest",
+        "type": "object"
+      },
+      "GenerateResponse": {
+        "description": "Successful LLM generation response.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "requestId": {
+            "format": "uuid",
+            "title": "Requestid",
+            "type": "string"
+          },
+          "resultKind": {
+            "const": "code",
+            "default": "code",
+            "title": "Resultkind",
+            "type": "string"
+          },
+          "tier": {
+            "const": "backend",
+            "default": "backend",
+            "title": "Tier",
+            "type": "string"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenUsage"
+          }
+        },
+        "required": [
+          "content",
+          "model",
+          "requestId"
+        ],
+        "title": "GenerateResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -267,6 +373,31 @@
           "environment"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "LlmContextCell": {
+        "description": "Neighboring notebook cell sent as generation context.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "code",
+              "markdown",
+              "text"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "source": {
+            "maxLength": 8000,
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "source"
+        ],
+        "title": "LlmContextCell",
         "type": "object"
       },
       "LogoutRequest": {
@@ -594,6 +725,23 @@
           "refreshToken"
         ],
         "title": "RefreshResponse",
+        "type": "object"
+      },
+      "TokenUsage": {
+        "description": "Token usage metadata returned by the provider.",
+        "properties": {
+          "completion": {
+            "default": 0,
+            "title": "Completion",
+            "type": "integer"
+          },
+          "prompt": {
+            "default": 0,
+            "title": "Prompt",
+            "type": "integer"
+          }
+        },
+        "title": "TokenUsage",
         "type": "object"
       },
       "ValidationError": {
@@ -1008,6 +1156,103 @@
         ]
       }
     },
+    "/api/v1/llm/generate": {
+      "post": {
+        "description": "Generate validated JavaScript/TypeScript code for an authenticated user.",
+        "operationId": "generate_code_api_v1_llm_generate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Prompt rejected or generated code failed validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Per-user LLM rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Internal LLM provider configuration error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Bedrock provider failed"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Bedrock provider is not configured"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Generate code via the Cloud LLM agent",
+        "tags": [
+          "LLM"
+        ]
+      }
+    },
     "/api/v1/notebooks": {
       "get": {
         "description": "``GET /notebooks`` — paginated list of the user's notebooks.\n\nQuery-параметры ``limit``/``offset`` валидируются FastAPI (``ge``/``le``);\n``sort``/``order`` валидируются сервисом по whitelist.\n\nArgs:\n    limit: Размер страницы (1..200, по умолчанию 50).\n    offset: Смещение (≥ 0).\n    sort: Поле сортировки (``updatedAt`` / ``createdAt`` / ``title``).\n    order: Направление (``asc`` / ``desc``).\n    current_user: Авторизованный пользователь.\n    service: DI-инстанс сервиса.\n\nReturns:\n    Страница :class:`NotebookListResponse`.",
@@ -1368,6 +1613,10 @@
     {
       "description": "Owner-scoped Notebook CRUD and offline-first sync endpoints.",
       "name": "Notebooks"
+    },
+    {
+      "description": "Cloud code-generation endpoint backed by AWS Bedrock, protected by Bearer auth, prompt guard checks, rate limiting, and output validation.",
+      "name": "LLM"
     }
   ]
 }

@@ -15,10 +15,18 @@ RUN pip install --prefix=/install .
 
 FROM python:3.14-slim AS runtime
 
+ARG ESBUILD_VERSION=0.21.5
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs npm \
+    && npm install -g "esbuild@${ESBUILD_VERSION}" \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN addgroup --system app && adduser --system --ingroup app app
 

@@ -66,6 +66,26 @@ def test_production_disables_placeholder_auth() -> None:
     assert settings.placeholder_auth_enabled is False
 
 
+def test_production_requires_eu_bedrock_inference_profiles() -> None:
+    with pytest.raises(ValidationError, match="LLM_BEDROCK_GUARD_MODEL_ID"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            jwt_secret="production-secret-value-at-least-32-chars",
+            otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+            llm_bedrock_guard_model_id="amazon.nova-micro-v1:0",
+        )
+
+    with pytest.raises(ValidationError, match="LLM_BEDROCK_GENERATOR_MODEL_ID"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            jwt_secret="production-secret-value-at-least-32-chars",
+            otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+            llm_bedrock_generator_model_id="amazon.nova-lite-v1:0",
+        )
+
+
 def test_get_email_service_returns_noop_boundary() -> None:
     settings = Settings(_env_file=None)
 
