@@ -152,3 +152,68 @@ def test_llm_generate_rate_limits_per_user(client: TestClient) -> None:
     assert second.status_code == 429
     assert second.json()["error"]["code"] == "rate_limited"
     assert int(second.headers["Retry-After"]) >= 1
+
+
+# --- A1: outer pipeline deadline (LLM-NF-01) --------------------------------
+
+
+def test_llm_generate_504_on_pipeline_timeout(client: TestClient) -> None:
+    """If service.generate hangs longer than the deadline → 504 llm_timeout."""
+    import time
+
+    from app.modules.llm.services.errors import LlmTimeoutError
+
+    class SlowService:
+        def generate(self, payload, user):  # type: ignore[no-untyped-def]
+            time.sleep(2.0)
+            return GenerateResponse(content="never", model="m", request_id=uuid4())
+
+    original_timeout = settings.llm_request_timeout_seconds
+    settings.llm_request_timeout_seconds = 1
+
+    headers = _login(client)
+    app.dependency_overrides[get_llm_generation_service] = lambda: SlowService()
+    app.dependency_overrides[get_rate_limiter] = lambda: InMemoryRateLimiter(20, 60)
+
+    try:
+        response = client.post(
+            f"{settings.api_prefix}/llm/generate",
+            json={"prompt": "x"},
+            headers=headers,
+        )
+    finally:
+        app.dependency_overrides.pop(get_llm_generation_service, None)
+        app.dependency_overrides.pop(get_rate_limiter, None)
+        settings.llm_request_timeout_seconds = original_timeout
+
+    assert response.status_code == LlmTimeoutError.status_code  # 504
+    assert response.json()["error"]["code"] == LlmTimeoutError.code  # llm_timeout
+
+
+# --- A9: Content-Length short-circuit ---------------------------------------
+
+
+def test_llm_generate_422_on_content_length_too_large(client: TestClient) -> None:
+    """A huge Content-Length header is rejected before the body is buffered."""
+    headers = _login(client)
+    headers["Content-Length"] = str(settings.llm_max_total_bytes + 1)
+    response = client.post(
+        f"{settings.api_prefix}/llm/generate",
+        json={"prompt": "small payload"},
+        headers=headers,
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "request_too_large"
+
+
+# --- A10: auth runs before body read ---------------------------------------
+
+
+def test_llm_generate_401_without_bearer_does_not_read_body(client: TestClient) -> None:
+    """Anonymous requests fail with 401 before body buffering kicks in."""
+    response = client.post(
+        f"{settings.api_prefix}/llm/generate",
+        json={"prompt": "x" * 100},
+    )
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_token"

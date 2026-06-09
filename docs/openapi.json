@@ -802,7 +802,7 @@
       "name": "MIT"
     },
     "title": "JS Notebook API",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1158,7 +1158,7 @@
     },
     "/api/v1/llm/generate": {
       "post": {
-        "description": "Generate validated JavaScript/TypeScript code for an authenticated user.",
+        "description": "Generate validated JavaScript/TypeScript code for an authenticated user.\n\nThe whole guard → generate → validate → repair pipeline runs inside\na worker thread and is capped by ``settings.llm_request_timeout_seconds``\n(``LLM-NF-01``). Exceeding the deadline raises\n:class:`LlmTimeoutError` → ``504 llm_timeout``. The in-flight worker\nkeeps running until Bedrock returns, but the HTTP response is no\nlonger blocked by it.",
         "operationId": "generate_code_api_v1_llm_generate_post",
         "requestBody": {
           "content": {
@@ -1240,6 +1240,16 @@
               }
             },
             "description": "Bedrock provider is not configured"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Generation pipeline exceeded the configured deadline"
           }
         },
         "security": [

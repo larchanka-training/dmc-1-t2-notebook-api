@@ -167,7 +167,9 @@ class LlmGenerationService:
                 temperature=self.temperature,
             )
 
-        raise CodeValidationError("Generated code did not pass syntax validation")
+        # Loop exits only via ``return`` on success or ``raise`` on the
+        # final attempt. No fall-through ``raise`` is needed below.
+        raise AssertionError("unreachable: _validate_or_repair loop did not terminate")
 
 
 def _guard_system_prompt() -> str:

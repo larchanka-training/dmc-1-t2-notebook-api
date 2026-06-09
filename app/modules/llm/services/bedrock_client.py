@@ -177,13 +177,57 @@ def _parse_converse_response(
 
 
 def parse_guard_json(response_text: str) -> bool:
-    """Return whether the guard response marks the prompt as safe."""
+    """Return whether the guard response marks the prompt as safe.
+
+    Tolerant to fenced output. The guard system prompt asks for strict
+    JSON (``{"safe": true}`` / ``{"safe": false}``), but Nova-Micro
+    sometimes wraps its answer in a ```json fence or prepends a short
+    sentence. We try a raw ``json.loads`` first, then fall back to
+    extracting the first ``{ ... }`` substring before giving up. Empty
+    or non-JSON responses still raise :class:`LlmProviderError` so the
+    upstream controller surfaces them as ``502 llm_provider_error``.
+    """
+    text = (response_text or "").strip()
+    if not text:
+        raise LlmProviderError("Guard model returned an empty response")
+
+    payload: Any | None = None
     try:
-        payload = json.loads(response_text)
-    except json.JSONDecodeError as exc:
-        raise LlmProviderError("Guard model returned invalid JSON") from exc
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = _extract_first_json_object(text)
+
+    if not isinstance(payload, dict):
+        raise LlmProviderError("Guard model returned invalid JSON")
 
     safe = payload.get("safe")
     if not isinstance(safe, bool):
         raise LlmProviderError("Guard model JSON must contain boolean safe")
     return safe
+
+
+def _extract_first_json_object(text: str) -> Any | None:
+    """Extract the first balanced ``{ ... }`` JSON object substring.
+
+    Used as a fallback when the guard model wraps its JSON in a
+    markdown fence or prose. Returns ``None`` if no valid object is
+    found — the caller raises :class:`LlmProviderError` for that case.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    for index in range(start, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : index + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    return None
+    return None

@@ -37,12 +37,18 @@ class GenerateRequest(BaseModel):
         """Validate cross-field and byte-size constraints."""
         if self.mode == "edit" and not (self.base_code or "").strip():
             raise ValueError("baseCode is required when mode is edit")
+
+        prompt_cap_kib = settings.llm_max_prompt_bytes // 1024
         if len(self.prompt.encode("utf-8")) > settings.llm_max_prompt_bytes:
-            raise ValueError("prompt exceeds the 8 KiB UTF-8 byte limit")
+            raise ValueError(
+                f"prompt exceeds the {prompt_cap_kib} KiB UTF-8 byte limit"
+            )
 
         context_bytes = sum(len(cell.source.encode("utf-8")) for cell in self.context)
         if context_bytes > settings.llm_max_prompt_bytes:
-            raise ValueError("context exceeds the 8 KiB UTF-8 byte limit")
+            raise ValueError(
+                f"context exceeds the {prompt_cap_kib} KiB UTF-8 byte limit"
+            )
         return self
 
 

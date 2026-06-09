@@ -48,3 +48,16 @@ class CodeValidationError(LlmServiceError):
 
     code = "code_validation_failed"
     status_code = 422
+
+
+class LlmTimeoutError(LlmServiceError):
+    """Raised when the whole generation pipeline exceeds its deadline.
+
+    The cap is documented in ``docs/requirements.md`` as ``LLM-NF-01``
+    (30 seconds end-to-end). Individual Bedrock calls have their own
+    per-request timeout, but the orchestration could otherwise stack
+    guard + generate + repair attempts and breach the contract.
+    """
+
+    code = "llm_timeout"
+    status_code = 504

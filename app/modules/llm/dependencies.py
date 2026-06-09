@@ -28,15 +28,40 @@ def get_rate_limiter() -> InMemoryRateLimiter:
 
 
 async def enforce_llm_body_size(request: Request) -> None:
-    """Reject oversized generation request bodies before invoking LLMs."""
+    """Reject oversized generation request bodies before invoking LLMs.
+
+    Two-stage size enforcement:
+
+    1. Short-circuit via the ``Content-Length`` request header **before**
+       buffering the body — this prevents a hostile client from streaming
+       a multi-megabyte payload into memory just to be rejected. Servers
+       and proxies typically validate ``Content-Length`` against the
+       transferred bytes, but we treat the header as a defensive hint.
+    2. Buffer and re-check the actual byte length. The header is
+       advisory; a malformed/missing header is allowed to fall through to
+       the buffered check.
+    """
+    total_cap = settings.llm_max_total_bytes
+    cap_kib = total_cap // 1024
+    error_message = f"LLM generation request body exceeds the {cap_kib} KiB limit"
+
+    content_length_header = request.headers.get("content-length")
+    if content_length_header is not None:
+        try:
+            declared = int(content_length_header)
+        except ValueError:
+            declared = -1  # malformed header — fall through to buffered check
+        if declared > total_cap:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "request_too_large", "message": error_message},
+            )
+
     body = await request.body()
-    if len(body) > settings.llm_max_total_bytes:
+    if len(body) > total_cap:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={
-                "code": "request_too_large",
-                "message": "LLM generation request body exceeds the 16 KiB limit",
-            },
+            detail={"code": "request_too_large", "message": error_message},
         )
 
 

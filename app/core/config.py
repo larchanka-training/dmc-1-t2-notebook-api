@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     """
 
     app_name: str = "JS Notebook API"
-    app_version: str = "0.1.0"
+    app_version: str = "0.2.0"
     app_env: str = "dev"
     api_prefix: str = "/api/v1"
     app_host: str = "0.0.0.0"
@@ -128,6 +128,11 @@ class Settings(BaseSettings):
             raise ValueError("LLM_RATE_LIMIT_PER_MINUTE must be positive")
         if self.llm_validation_max_retries < 0:
             raise ValueError("LLM_VALIDATION_MAX_RETRIES must be non-negative")
+        if self.llm_validation_max_retries > 2:
+            raise ValueError(
+                "LLM_VALIDATION_MAX_RETRIES must be <= 2 "
+                "(docs/ai-architecture.md §7.1 caps total attempts at 3)"
+            )
         if self.llm_validation_timeout_seconds <= 0:
             raise ValueError("LLM_VALIDATION_TIMEOUT_SECONDS must be positive")
         if self.llm_max_tokens <= 0:
