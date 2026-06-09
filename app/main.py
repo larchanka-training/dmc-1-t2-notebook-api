@@ -21,6 +21,7 @@ from app.core.errors import install_error_handlers
 from app.core.logging import configure_logging
 from app.modules.auth import router as auth_router
 from app.modules.health import router as health_router
+from app.modules.llm import router as llm_router
 from app.modules.notebooks import router as notebooks_router
 
 configure_logging()
@@ -48,6 +49,13 @@ tags_metadata = [
     {
         "name": "Notebooks",
         "description": "Owner-scoped Notebook CRUD and offline-first sync endpoints.",
+    },
+    {
+        "name": "LLM",
+        "description": (
+            "Cloud code-generation endpoint backed by AWS Bedrock, protected "
+            "by Bearer auth, prompt guard checks, rate limiting, and output validation."
+        ),
     },
 ]
 
@@ -96,6 +104,7 @@ app.add_middleware(
 app.include_router(health_router, prefix=settings.api_prefix)
 app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(notebooks_router, prefix=settings.api_prefix)
+app.include_router(llm_router, prefix=settings.api_prefix)
 
 
 @app.get(

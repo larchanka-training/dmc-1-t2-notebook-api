@@ -192,6 +192,112 @@
         "title": "CurrentUser",
         "type": "object"
       },
+      "GenerateRequest": {
+        "description": "Request body for ``POST /llm/generate``.",
+        "properties": {
+          "baseCode": {
+            "anyOf": [
+              {
+                "maxLength": 8000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basecode"
+          },
+          "context": {
+            "items": {
+              "$ref": "#/components/schemas/LlmContextCell"
+            },
+            "maxItems": 10,
+            "title": "Context",
+            "type": "array"
+          },
+          "language": {
+            "default": "javascript",
+            "enum": [
+              "javascript",
+              "typescript"
+            ],
+            "title": "Language",
+            "type": "string"
+          },
+          "mode": {
+            "default": "generate",
+            "enum": [
+              "generate",
+              "edit"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "notebookTitle": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notebooktitle"
+          },
+          "prompt": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "title": "GenerateRequest",
+        "type": "object"
+      },
+      "GenerateResponse": {
+        "description": "Successful LLM generation response.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "requestId": {
+            "format": "uuid",
+            "title": "Requestid",
+            "type": "string"
+          },
+          "resultKind": {
+            "const": "code",
+            "default": "code",
+            "title": "Resultkind",
+            "type": "string"
+          },
+          "tier": {
+            "const": "backend",
+            "default": "backend",
+            "title": "Tier",
+            "type": "string"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenUsage"
+          }
+        },
+        "required": [
+          "content",
+          "model",
+          "requestId"
+        ],
+        "title": "GenerateResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -267,6 +373,31 @@
           "environment"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "LlmContextCell": {
+        "description": "Neighboring notebook cell sent as generation context.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "code",
+              "markdown",
+              "text"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "source": {
+            "maxLength": 8000,
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "source"
+        ],
+        "title": "LlmContextCell",
         "type": "object"
       },
       "LogoutRequest": {
@@ -596,6 +727,23 @@
         "title": "RefreshResponse",
         "type": "object"
       },
+      "TokenUsage": {
+        "description": "Token usage metadata returned by the provider.",
+        "properties": {
+          "completion": {
+            "default": 0,
+            "title": "Completion",
+            "type": "integer"
+          },
+          "prompt": {
+            "default": 0,
+            "title": "Prompt",
+            "type": "integer"
+          }
+        },
+        "title": "TokenUsage",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -654,7 +802,7 @@
       "name": "MIT"
     },
     "title": "JS Notebook API",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1005,6 +1153,113 @@
         "summary": "Readiness probe",
         "tags": [
           "Health"
+        ]
+      }
+    },
+    "/api/v1/llm/generate": {
+      "post": {
+        "description": "Generate validated JavaScript/TypeScript code for an authenticated user.\n\nThe whole guard → generate → validate → repair pipeline runs inside\na worker thread and is capped by ``settings.llm_request_timeout_seconds``\n(``LLM-NF-01``). Exceeding the deadline raises\n:class:`LlmTimeoutError` → ``504 llm_timeout``. The in-flight worker\nkeeps running until Bedrock returns, but the HTTP response is no\nlonger blocked by it.",
+        "operationId": "generate_code_api_v1_llm_generate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Prompt rejected or generated code failed validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Per-user LLM rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Internal LLM provider configuration error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Bedrock provider failed"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Bedrock provider is not configured"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Generation pipeline exceeded the configured deadline"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Generate code via the Cloud LLM agent",
+        "tags": [
+          "LLM"
         ]
       }
     },
@@ -1368,6 +1623,10 @@
     {
       "description": "Owner-scoped Notebook CRUD and offline-first sync endpoints.",
       "name": "Notebooks"
+    },
+    {
+      "description": "Cloud code-generation endpoint backed by AWS Bedrock, protected by Bearer auth, prompt guard checks, rate limiting, and output validation.",
+      "name": "LLM"
     }
   ]
 }

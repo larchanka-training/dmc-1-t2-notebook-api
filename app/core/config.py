@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     """
 
     app_name: str = "JS Notebook API"
-    app_version: str = "0.1.0"
+    app_version: str = "0.2.0"
     app_env: str = "dev"
     api_prefix: str = "/api/v1"
     app_host: str = "0.0.0.0"
@@ -54,6 +54,18 @@ class Settings(BaseSettings):
     otp_max_attempts: int = 5
     otp_rate_limit_per_email: int = 3
     allow_placeholder_auth: bool | None = None
+    llm_bedrock_region: str = "eu-north-1"
+    llm_bedrock_guard_model_id: str = "eu.amazon.nova-micro-v1:0"
+    llm_bedrock_generator_model_id: str = "eu.amazon.nova-lite-v1:0"
+    llm_max_prompt_bytes: int = 8_192
+    llm_max_total_bytes: int = 16_384
+    llm_request_timeout_seconds: int = 30
+    llm_rate_limit_per_minute: int = 20
+    llm_validation_max_retries: int = 2
+    llm_validation_timeout_seconds: float = 5.0
+    llm_esbuild_command: str = "esbuild"
+    llm_max_tokens: int = 2_048
+    llm_temperature: float = 0.2
     cors_allowed_origins: list[str] = [
         "http://localhost:5173",
         "http://notebook.com",
@@ -104,8 +116,43 @@ class Settings(BaseSettings):
             raise ValueError("OTP_MAX_ATTEMPTS must be positive")
         if self.otp_rate_limit_per_email <= 0:
             raise ValueError("OTP_RATE_LIMIT_PER_EMAIL must be positive")
+        if self.llm_request_timeout_seconds <= 0:
+            raise ValueError("LLM_REQUEST_TIMEOUT_SECONDS must be positive")
+        if self.llm_max_prompt_bytes <= 0:
+            raise ValueError("LLM_MAX_PROMPT_BYTES must be positive")
+        if self.llm_max_total_bytes <= 0:
+            raise ValueError("LLM_MAX_TOTAL_BYTES must be positive")
+        if self.llm_max_total_bytes < self.llm_max_prompt_bytes:
+            raise ValueError("LLM_MAX_TOTAL_BYTES must be greater than or equal to LLM_MAX_PROMPT_BYTES")
+        if self.llm_rate_limit_per_minute <= 0:
+            raise ValueError("LLM_RATE_LIMIT_PER_MINUTE must be positive")
+        if self.llm_validation_max_retries < 0:
+            raise ValueError("LLM_VALIDATION_MAX_RETRIES must be non-negative")
+        if self.llm_validation_max_retries > 2:
+            raise ValueError(
+                "LLM_VALIDATION_MAX_RETRIES must be <= 2 "
+                "(docs/ai-architecture.md §7.1 caps total attempts at 3)"
+            )
+        if self.llm_validation_timeout_seconds <= 0:
+            raise ValueError("LLM_VALIDATION_TIMEOUT_SECONDS must be positive")
+        if self.llm_max_tokens <= 0:
+            raise ValueError("LLM_MAX_TOKENS must be positive")
+        if not 0 <= self.llm_temperature <= 2:
+            raise ValueError("LLM_TEMPERATURE must be between 0 and 2")
 
         if self.is_production_like:
+            for field_name, value in [
+                ("LLM_BEDROCK_GUARD_MODEL_ID", self.llm_bedrock_guard_model_id),
+                (
+                    "LLM_BEDROCK_GENERATOR_MODEL_ID",
+                    self.llm_bedrock_generator_model_id,
+                ),
+            ]:
+                if not value.startswith("eu."):
+                    raise ValueError(
+                        f"{field_name} must use an EU Geo inference profile "
+                        "with the 'eu.' prefix in production-like environments"
+                    )
             if self.jwt_secret == DEV_JWT_SECRET or len(self.jwt_secret) < 32:
                 raise ValueError(
                     "JWT_SECRET must be set to a non-default value of at least 32 characters in production-like environments"

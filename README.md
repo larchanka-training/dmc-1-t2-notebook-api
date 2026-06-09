@@ -193,6 +193,12 @@ Notebook endpoints:
 | `PATCH /api/v1/notebooks/{id}` | Merge/update a notebook with LWW per-cell conflict handling. |
 | `DELETE /api/v1/notebooks/{id}` | Soft-delete a notebook. |
 
+LLM endpoint:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/v1/llm/generate` | Generate JavaScript/TypeScript code through the authenticated Cloud agent. The backend runs a Bedrock guard model, a Bedrock generator model, code extraction, esbuild syntax validation, and bounded repair retries before returning validated code. |
+
 Create example:
 
 ```bash

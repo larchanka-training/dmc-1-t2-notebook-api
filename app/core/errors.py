@@ -157,7 +157,10 @@ def install_error_handlers(app: FastAPI) -> None:
             if isinstance(raw_fields, dict):
                 fields = {str(key): str(value) for key, value in raw_fields.items()}
 
-        return error_response(exc.status_code, code, message, fields)
+        response = error_response(exc.status_code, code, message, fields)
+        if exc.headers:
+            response.headers.update(exc.headers)
+        return response
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception) -> JSONResponse:
