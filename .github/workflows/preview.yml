@@ -10,6 +10,11 @@ name: Preview — per-PR API
 # the monorepo terraform (terraform/preview-cloud). This workflow only creates
 # the ephemeral per-PR slice (task def + target group + rule + service).
 #
+# The per-PR task def derives from the TERRAFORM-REGISTERED baseline of the
+# shared main-api (read from the monorepo's Terraform state), not from the live
+# family's latest revision — Terraform is the single owner of the task-def
+# shape (env/secrets/roles), same discipline as the monorepo deploy workflows.
+#
 # Required repo config:
 #   secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  (the deploy-user keys)
 
@@ -30,7 +35,6 @@ env:
   ECR_REGISTRY: "867633231218.dkr.ecr.eu-north-1.amazonaws.com"
   ECR_REPOSITORY: "jsnotes-t2"
   PREVIEW_CLUSTER: "jsnotes-t2-preview"
-  MAIN_TASK_FAMILY: "jsnotes-t2-preview-main-api"
   MAIN_SERVICE: "jsnotes-t2-preview-main-api"
   ALB_NAME: "jsnotes-t2-preview-alb"
   PREVIEW_CF_DOMAIN: ${{ vars.PREVIEW_CLOUDFRONT_DOMAIN || 'd2e2ymc27fdfn5.cloudfront.net' }}
@@ -56,6 +60,31 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # The shared-layer Terraform config lives in the monorepo (public repo —
+      # no token needed). Checked out into ./mono only to read the task-def
+      # baseline from the Terraform state; placed before the image build so a
+      # missing baseline fails fast.
+      - name: Checkout monorepo (terraform config)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: larchanka-training/dmc-1-t2-notebook-mono
+          path: mono
+          persist-credentials: false
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+
+      - name: Read main-api baseline from Terraform state
+        run: |
+          set -euo pipefail
+          terraform -chdir=mono/terraform/preview-cloud init -input=false >/dev/null
+          BASE_TD_ARN=$(terraform -chdir=mono/terraform/preview-cloud output -raw main_api_task_definition_arn)
+          echo "Baseline: ${BASE_TD_ARN}"
+          echo "BASE_TD_ARN=${BASE_TD_ARN}" >> "${GITHUB_ENV}"
+
       - name: Build & push api-pr-${{ env.PR }}
         run: |
           set -euo pipefail
@@ -73,10 +102,12 @@ jobs:
           FAMILY="preview-pr-${PR}"
           HEALTH="python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:${API_PORT}${PREFIX}/health', timeout=3)\""
 
-          # Derive from the shared main-api task def: swap image, set API_PREFIX,
-          # fix the container health-check path, keep DATABASE_URL (-> preview_main),
-          # roles, logs. This is option B (shared DB).
-          aws ecs describe-task-definition --task-definition "${MAIN_TASK_FAMILY}" \
+          # Derive from the TERRAFORM BASELINE of the shared main-api: swap
+          # image, set API_PREFIX, fix the container health-check path, keep
+          # DATABASE_URL (-> preview_main), roles, logs. This is option B
+          # (shared DB). Rendering from the baseline (not the live family's
+          # latest revision) keeps env/secrets exactly as IaC defines them.
+          aws ecs describe-task-definition --task-definition "${BASE_TD_ARN}" \
             --query 'taskDefinition' > base.json
           jq --arg IMG "${IMAGE}" --arg FAM "${FAMILY}" --arg PREFIX "${PREFIX}" --arg HEALTH "${HEALTH}" '
             .family = $FAM
@@ -87,8 +118,8 @@ jobs:
                   | .healthCheck.command = ["CMD-SHELL", $HEALTH]
                   | .logConfiguration.options."awslogs-stream-prefix" = $FAM
                 else . end)
-            | {family, taskRoleArn, executionRoleArn, networkMode, containerDefinitions,
-               requiresCompatibilities, cpu, memory}
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                  .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
           ' base.json > td.json
           TD_ARN=$(aws ecs register-task-definition --cli-input-json file://td.json \
             --query 'taskDefinition.taskDefinitionArn' --output text)
@@ -148,6 +179,24 @@ jobs:
 
       - name: Wait for the service to stabilize
         run: aws ecs wait services-stable --cluster "${PREVIEW_CLUSTER}" --services "preview-pr-${PR}"
+
+      # `services-stable` also succeeds when the deployment circuit breaker
+      # rolled back to a previous revision — only pass if OUR revision is the
+      # one actually serving (same discipline as the monorepo deploys).
+      - name: Verify the new revision is live (no silent rollback)
+        run: |
+          set -euo pipefail
+          ACTIVE=$(aws ecs describe-services --cluster "${PREVIEW_CLUSTER}" --services "preview-pr-${PR}" \
+            --query 'services[0].taskDefinition' --output text)
+          echo "Active:   ${ACTIVE}"
+          echo "Expected: ${TD_ARN}"
+          if [ "${ACTIVE}" != "${TD_ARN}" ]; then
+            REASON=$(aws ecs describe-services --cluster "${PREVIEW_CLUSTER}" --services "preview-pr-${PR}" \
+              --query 'services[0].events[0:5].message' --output text)
+            echo "::error::Per-PR preview rolled back — still on ${ACTIVE}. Recent events: ${REASON}."
+            exit 1
+          fi
+          echo "New revision is serving."
 
       - name: Sticky PR comment
         env:
