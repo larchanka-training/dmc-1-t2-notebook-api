@@ -86,6 +86,24 @@ def test_production_requires_eu_bedrock_inference_profiles() -> None:
         )
 
 
+def test_production_disables_backend_execute() -> None:
+    # ENABLE_EXECUTE behind the debug/fallback subprocess runner must not be
+    # silently turnable-on in prod: the server refuses to start with the unsafe
+    # combination until a hardened runtime exists.
+    with pytest.raises(ValidationError, match="ENABLE_EXECUTE"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            jwt_secret="production-secret-value-at-least-32-chars",
+            otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+            enable_execute=True,
+        )
+
+    # Local/dev environments may enable it freely.
+    settings = Settings(_env_file=None, enable_execute=True)
+    assert settings.enable_execute is True
+
+
 def test_get_email_service_returns_noop_boundary() -> None:
     settings = Settings(_env_file=None)
 

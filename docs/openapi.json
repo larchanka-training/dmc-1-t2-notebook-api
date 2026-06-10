@@ -40,6 +40,59 @@
         "title": "ApiErrorResponse",
         "type": "object"
       },
+      "ArrayValue": {
+        "description": "An array of serialized values.",
+        "properties": {
+          "items": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "array": "#/components/schemas/ArrayValue",
+                  "function": "#/components/schemas/FunctionValue",
+                  "object": "#/components/schemas/ObjectValue",
+                  "primitive": "#/components/schemas/PrimitiveValue",
+                  "truncated": "#/components/schemas/TruncatedValue",
+                  "undefined": "#/components/schemas/UndefinedValue"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/PrimitiveValue"
+                },
+                {
+                  "$ref": "#/components/schemas/UndefinedValue"
+                },
+                {
+                  "$ref": "#/components/schemas/ArrayValue"
+                },
+                {
+                  "$ref": "#/components/schemas/ObjectValue"
+                },
+                {
+                  "$ref": "#/components/schemas/TruncatedValue"
+                },
+                {
+                  "$ref": "#/components/schemas/FunctionValue"
+                }
+              ]
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "kind": {
+            "const": "array",
+            "default": "array",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ArrayValue",
+        "type": "object"
+      },
       "CellSchema": {
         "description": "Single notebook cell as exchanged over the API.\n\nАтомарная ячейка: код или markdown. ``updated_at`` ставит сам\nклиент (миллисекунды от эпохи) — сервер его не переписывает.\nЭто и есть основа LWW-синхронизации.",
         "properties": {
@@ -190,6 +243,196 @@
           "id"
         ],
         "title": "CurrentUser",
+        "type": "object"
+      },
+      "ErrorItem": {
+        "description": "A thrown error surfaced to the output panel.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "stack": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stack"
+          },
+          "type": {
+            "const": "error",
+            "default": "error",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "message"
+        ],
+        "title": "ErrorItem",
+        "type": "object"
+      },
+      "ExecuteRequest": {
+        "description": "Request body for ``POST /api/v1/execute``.",
+        "properties": {
+          "code": {
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "language": {
+            "default": "javascript",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Language",
+            "type": "string"
+          },
+          "timeoutMs": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeoutms"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "ExecuteRequest",
+        "type": "object"
+      },
+      "ExecuteResponse": {
+        "description": "Unified execution result (``cell.outputs``-compatible payload).",
+        "properties": {
+          "executedOn": {
+            "const": "backend",
+            "default": "backend",
+            "title": "Executedon",
+            "type": "string"
+          },
+          "outputs": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "error": "#/components/schemas/ErrorItem",
+                  "html": "#/components/schemas/HtmlItem",
+                  "image": "#/components/schemas/ImageItem",
+                  "result": "#/components/schemas/ResultItem",
+                  "stderr": "#/components/schemas/StderrItem",
+                  "stdout": "#/components/schemas/StdoutItem"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/StdoutItem"
+                },
+                {
+                  "$ref": "#/components/schemas/StderrItem"
+                },
+                {
+                  "$ref": "#/components/schemas/ResultItem"
+                },
+                {
+                  "$ref": "#/components/schemas/ErrorItem"
+                },
+                {
+                  "$ref": "#/components/schemas/HtmlItem"
+                },
+                {
+                  "$ref": "#/components/schemas/ImageItem"
+                }
+              ]
+            },
+            "title": "Outputs",
+            "type": "array"
+          },
+          "stats": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "error",
+              "timeout",
+              "unsupported_language"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ExecuteResponse",
+        "type": "object"
+      },
+      "ExecutionStats": {
+        "description": "Execution metrics for diagnostics (``ExecutionResult.stats`` subset).",
+        "properties": {
+          "durationMs": {
+            "minimum": 0.0,
+            "title": "Durationms",
+            "type": "integer"
+          },
+          "memoryKb": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memorykb"
+          }
+        },
+        "required": [
+          "durationMs"
+        ],
+        "title": "ExecutionStats",
+        "type": "object"
+      },
+      "FunctionValue": {
+        "description": "A function value, represented by its name only.",
+        "properties": {
+          "kind": {
+            "const": "function",
+            "default": "function",
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "FunctionValue",
         "type": "object"
       },
       "GenerateRequest": {
@@ -373,6 +616,51 @@
           "environment"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "HtmlItem": {
+        "description": "HTML rendered inside a sandboxed iframe (``display({type:'html'})``).",
+        "properties": {
+          "html": {
+            "title": "Html",
+            "type": "string"
+          },
+          "type": {
+            "const": "html",
+            "default": "html",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "html"
+        ],
+        "title": "HtmlItem",
+        "type": "object"
+      },
+      "ImageItem": {
+        "description": "A base64-encoded image with its MIME type.",
+        "properties": {
+          "data": {
+            "title": "Data",
+            "type": "string"
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "type": {
+            "const": "image",
+            "default": "image",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mime",
+          "data"
+        ],
+        "title": "ImageItem",
         "type": "object"
       },
       "LlmContextCell": {
@@ -617,6 +905,69 @@
         "title": "NotebookResponse",
         "type": "object"
       },
+      "ObjectValue": {
+        "description": "An object as an ordered list of ``[key, value]`` entries.",
+        "properties": {
+          "entries": {
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "discriminator": {
+                    "mapping": {
+                      "array": "#/components/schemas/ArrayValue",
+                      "function": "#/components/schemas/FunctionValue",
+                      "object": "#/components/schemas/ObjectValue",
+                      "primitive": "#/components/schemas/PrimitiveValue",
+                      "truncated": "#/components/schemas/TruncatedValue",
+                      "undefined": "#/components/schemas/UndefinedValue"
+                    },
+                    "propertyName": "kind"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/PrimitiveValue"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UndefinedValue"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ArrayValue"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ObjectValue"
+                    },
+                    {
+                      "$ref": "#/components/schemas/TruncatedValue"
+                    },
+                    {
+                      "$ref": "#/components/schemas/FunctionValue"
+                    }
+                  ]
+                }
+              ],
+              "type": "array"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "kind": {
+            "const": "object",
+            "default": "object",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "title": "ObjectValue",
+        "type": "object"
+      },
       "OtpRequest": {
         "description": "Request body for starting email OTP login.",
         "properties": {
@@ -694,6 +1045,42 @@
         "title": "OtpVerifyResponse",
         "type": "object"
       },
+      "PrimitiveValue": {
+        "description": "A JSON-primitive value (``string | number | boolean | null``).\n\nCaveat: the controller serializes with ``response_model_exclude_none`` to\nkeep optional fields (``stats``, ``error.stack``) absent rather than\n``null`` — matching the UI ``cell.outputs`` optional semantics. That would\nalso drop a genuine ``value: null`` here, but the subprocess runner never\nemits ``result`` items, so this branch is unreachable today. A future\nQuickJS path that emits results must revisit this (e.g. drop the global\nexclude_none in favour of per-field handling).",
+        "properties": {
+          "kind": {
+            "const": "primitive",
+            "default": "primitive",
+            "title": "Kind",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "PrimitiveValue",
+        "type": "object"
+      },
       "RefreshRequest": {
         "description": "Request body for rotating a refresh token.",
         "properties": {
@@ -727,6 +1114,96 @@
         "title": "RefreshResponse",
         "type": "object"
       },
+      "ResultItem": {
+        "description": "The serialized value of the last evaluated expression.",
+        "properties": {
+          "type": {
+            "const": "result",
+            "default": "result",
+            "title": "Type",
+            "type": "string"
+          },
+          "value": {
+            "discriminator": {
+              "mapping": {
+                "array": "#/components/schemas/ArrayValue",
+                "function": "#/components/schemas/FunctionValue",
+                "object": "#/components/schemas/ObjectValue",
+                "primitive": "#/components/schemas/PrimitiveValue",
+                "truncated": "#/components/schemas/TruncatedValue",
+                "undefined": "#/components/schemas/UndefinedValue"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PrimitiveValue"
+              },
+              {
+                "$ref": "#/components/schemas/UndefinedValue"
+              },
+              {
+                "$ref": "#/components/schemas/ArrayValue"
+              },
+              {
+                "$ref": "#/components/schemas/ObjectValue"
+              },
+              {
+                "$ref": "#/components/schemas/TruncatedValue"
+              },
+              {
+                "$ref": "#/components/schemas/FunctionValue"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "ResultItem",
+        "type": "object"
+      },
+      "StderrItem": {
+        "description": "A chunk of ``console.error``/``console.warn`` output.",
+        "properties": {
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "type": {
+            "const": "stderr",
+            "default": "stderr",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "StderrItem",
+        "type": "object"
+      },
+      "StdoutItem": {
+        "description": "A chunk of ``console.log``/``console.info`` output.",
+        "properties": {
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "type": {
+            "const": "stdout",
+            "default": "stdout",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "StdoutItem",
+        "type": "object"
+      },
       "TokenUsage": {
         "description": "Token usage metadata returned by the provider.",
         "properties": {
@@ -742,6 +1219,39 @@
           }
         },
         "title": "TokenUsage",
+        "type": "object"
+      },
+      "TruncatedValue": {
+        "description": "A value cut off because the structure exceeded the depth budget.",
+        "properties": {
+          "kind": {
+            "const": "truncated",
+            "default": "truncated",
+            "title": "Kind",
+            "type": "string"
+          },
+          "placeholder": {
+            "title": "Placeholder",
+            "type": "string"
+          }
+        },
+        "required": [
+          "placeholder"
+        ],
+        "title": "TruncatedValue",
+        "type": "object"
+      },
+      "UndefinedValue": {
+        "description": "The JavaScript ``undefined`` value.",
+        "properties": {
+          "kind": {
+            "const": "undefined",
+            "default": "undefined",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "title": "UndefinedValue",
         "type": "object"
       },
       "ValidationError": {
@@ -1070,6 +1580,73 @@
         "summary": "Refresh auth tokens",
         "tags": [
           "Auth"
+        ]
+      }
+    },
+    "/api/v1/execute": {
+      "post": {
+        "description": "Run JavaScript and return a ``cell.outputs``-compatible result.\n\nExecution *errors of user code* (syntax/runtime/timeout) are not HTTP\nerrors — they arrive as ``200`` with ``status`` ∈ ``error | timeout`` and\nstructured ``outputs`` (docs/execution-architecture.md §9). HTTP error\ncodes are reserved for problems with the request or the runtime itself.\n\nArgs:\n    payload: The code, language, and optional ``timeoutMs``.\n    current_user: The authenticated caller (feature-flag + auth gate).\n    service: The execution service (subprocess runner).\n\nReturns:\n    The unified :class:`ExecuteResponse`.",
+        "operationId": "execute_code_api_v1_execute_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecuteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecuteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request (empty code, non-positive timeout, oversized source)"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Endpoint disabled (`execute_disabled`) or runtime unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Execute notebook cell code on the backend (debug/fallback)",
+        "tags": [
+          "Execution"
         ]
       }
     },
@@ -1627,6 +2204,10 @@
     {
       "description": "Cloud code-generation endpoint backed by AWS Bedrock, protected by Bearer auth, prompt guard checks, rate limiting, and output validation.",
       "name": "LLM"
+    },
+    {
+      "description": "Backend code-execution debug/fallback endpoint. Disabled by default (ENABLE_EXECUTE=false); when enabled it sits behind Bearer auth. The subprocess runner is NOT a production sandbox (docs/execution-architecture.md §12).",
+      "name": "Execution"
     }
   ]
 }

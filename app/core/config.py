@@ -66,6 +66,19 @@ class Settings(BaseSettings):
     llm_esbuild_command: str = "esbuild"
     llm_max_tokens: int = 2_048
     llm_temperature: float = 0.2
+    # Backend code-execution endpoint (POST /api/v1/execute). Disabled by
+    # default: it is a debug/fallback runner, not the production sandbox.
+    # See docs/execution-architecture.md §12. The subprocess runner is NOT a
+    # production-grade sandbox — keep ENABLE_EXECUTE=false unless a hardened
+    # runtime is in place. validate_auth_settings hard-rejects enabling it in
+    # production-like environments (no silent prod RCE behind a single flag).
+    enable_execute: bool = False
+    execute_node_command: str = "node"
+    execute_default_timeout_ms: int = 5_000
+    execute_max_timeout_ms: int = 15_000
+    execute_max_code_bytes: int = 262_144
+    execute_max_output_bytes: int = 1_048_576
+    execute_max_memory_mb: int = 128
     cors_allowed_origins: list[str] = [
         "http://localhost:5173",
         "http://notebook.com",
@@ -139,6 +152,21 @@ class Settings(BaseSettings):
             raise ValueError("LLM_MAX_TOKENS must be positive")
         if not 0 <= self.llm_temperature <= 2:
             raise ValueError("LLM_TEMPERATURE must be between 0 and 2")
+        if self.execute_default_timeout_ms <= 0:
+            raise ValueError("EXECUTE_DEFAULT_TIMEOUT_MS must be positive")
+        if self.execute_max_timeout_ms <= 0:
+            raise ValueError("EXECUTE_MAX_TIMEOUT_MS must be positive")
+        if self.execute_max_timeout_ms < self.execute_default_timeout_ms:
+            raise ValueError(
+                "EXECUTE_MAX_TIMEOUT_MS must be greater than or equal to "
+                "EXECUTE_DEFAULT_TIMEOUT_MS"
+            )
+        if self.execute_max_code_bytes <= 0:
+            raise ValueError("EXECUTE_MAX_CODE_BYTES must be positive")
+        if self.execute_max_output_bytes <= 0:
+            raise ValueError("EXECUTE_MAX_OUTPUT_BYTES must be positive")
+        if self.execute_max_memory_mb <= 0:
+            raise ValueError("EXECUTE_MAX_MEMORY_MB must be positive")
 
         if self.is_production_like:
             for field_name, value in [
@@ -167,6 +195,11 @@ class Settings(BaseSettings):
             if self.allow_placeholder_auth:
                 raise ValueError(
                     "ALLOW_PLACEHOLDER_AUTH cannot be enabled in production-like environments"
+                )
+            if self.enable_execute:
+                raise ValueError(
+                    "ENABLE_EXECUTE cannot be enabled in production-like "
+                    "environments until a hardened execution runtime exists"
                 )
         return self
 
