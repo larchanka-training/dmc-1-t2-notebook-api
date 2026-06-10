@@ -199,6 +199,12 @@ LLM endpoint:
 | --- | --- |
 | `POST /api/v1/llm/generate` | Generate JavaScript/TypeScript code through the authenticated Cloud agent. The backend runs a Bedrock guard model, a Bedrock generator model, code extraction, esbuild syntax validation, and bounded repair retries before returning validated code. |
 
+Execution endpoint (debug/fallback):
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/v1/execute` | Run notebook JavaScript on the backend. **Disabled by default** (`ENABLE_EXECUTE=false`) — returns `503 execute_disabled` when off; behind Bearer auth when on. Returns `status` ∈ `ok/error/timeout/unsupported_language` and `outputs` in the UI `cell.outputs` format. The subprocess runner is **NOT** a production sandbox — see the monorepo `docs/execution-architecture.md` §12. |
+
 Create example:
 
 ```bash

@@ -20,6 +20,7 @@ from app.core.config import settings
 from app.core.errors import install_error_handlers
 from app.core.logging import configure_logging
 from app.modules.auth import router as auth_router
+from app.modules.execution import router as execution_router
 from app.modules.health import router as health_router
 from app.modules.llm import router as llm_router
 from app.modules.notebooks import router as notebooks_router
@@ -55,6 +56,15 @@ tags_metadata = [
         "description": (
             "Cloud code-generation endpoint backed by AWS Bedrock, protected "
             "by Bearer auth, prompt guard checks, rate limiting, and output validation."
+        ),
+    },
+    {
+        "name": "Execution",
+        "description": (
+            "Backend code-execution debug/fallback endpoint. Disabled by "
+            "default (ENABLE_EXECUTE=false); when enabled it sits behind "
+            "Bearer auth. The subprocess runner is NOT a production sandbox "
+            "(docs/execution-architecture.md §12)."
         ),
     },
 ]
@@ -105,6 +115,7 @@ app.include_router(health_router, prefix=settings.api_prefix)
 app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(notebooks_router, prefix=settings.api_prefix)
 app.include_router(llm_router, prefix=settings.api_prefix)
+app.include_router(execution_router, prefix=settings.api_prefix)
 
 
 @app.get(
