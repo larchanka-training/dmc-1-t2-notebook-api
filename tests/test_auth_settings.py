@@ -61,6 +61,7 @@ def test_production_disables_placeholder_auth() -> None:
         app_env="production",
         jwt_secret="production-secret-value-at-least-32-chars",
         otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+        resend_api_key="re_test_key",
     )
 
     assert settings.placeholder_auth_enabled is False
@@ -102,6 +103,26 @@ def test_production_disables_backend_execute() -> None:
     # Local/dev environments may enable it freely.
     settings = Settings(_env_file=None, enable_execute=True)
     assert settings.enable_execute is True
+
+
+def test_production_requires_resend_api_key() -> None:
+    with pytest.raises(ValidationError, match="RESEND_API_KEY"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            jwt_secret="production-secret-value-at-least-32-chars",
+            otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+        )
+
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        jwt_secret="production-secret-value-at-least-32-chars",
+        otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+        resend_api_key="re_test_key",
+    )
+
+    assert settings.resend_api_key == "re_test_key"
 
 
 def test_get_email_service_returns_noop_boundary() -> None:

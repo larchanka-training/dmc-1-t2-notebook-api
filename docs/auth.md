@@ -793,10 +793,8 @@ VM) отдаёт nginx (`proxy/`), не backend-приложение. Измен
 | `OTP_MAX_ATTEMPTS` | `5` | Неудачных попыток до инвалидации. |
 | `OTP_RATE_LIMIT_PER_EMAIL` | `3` | Запросов / 15 мин. |
 | `ALLOW_PLACEHOLDER_AUTH` | auto | Optional override. Работает только в local-like env; в production-like env запрещён validation’ом. |
-
-Future email-provider settings (`EMAIL_PROVIDER`, `EMAIL_PROVIDER_API_KEY`,
-`EMAIL_FROM`) будут добавлены отдельной задачей при выборе провайдера. Сейчас
-таких runtime settings в `app/core/config.py` нет.
+| `RESEND_API_KEY` | `""` | API-ключ [Resend](https://resend.com) для отправки OTP-писем. Required в production-like env (validation падает, если пусто). В local-like env не используется — `NoopEmailService` ничего не отправляет. |
+| `EMAIL_FROM` | `noreply@example.com` | Email-адрес отправителя для OTP-писем через Resend. |
 
 Существующие в `app/core/config.py` residual-переменные `token_ttl_seconds`
 (86400), `session_ttl_seconds` (604800) и `oauth_name_*` не используются новой

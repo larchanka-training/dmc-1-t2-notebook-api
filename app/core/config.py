@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     otp_max_attempts: int = 5
     otp_rate_limit_per_email: int = 3
     allow_placeholder_auth: bool | None = None
+    resend_api_key: str = ""
+    email_from: str = "noreply@example.com"
     llm_bedrock_region: str = "eu-north-1"
     llm_bedrock_guard_model_id: str = "eu.amazon.nova-micro-v1:0"
     llm_bedrock_generator_model_id: str = "eu.amazon.nova-lite-v1:0"
@@ -200,6 +202,10 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "ENABLE_EXECUTE cannot be enabled in production-like "
                     "environments until a hardened execution runtime exists"
+                )
+            if not self.resend_api_key:
+                raise ValueError(
+                    "RESEND_API_KEY must be set in production-like environments"
                 )
         return self
 

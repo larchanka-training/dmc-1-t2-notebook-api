@@ -3,6 +3,7 @@
 from app.modules.auth.services.email_service import (
     EmailService,
     NoopEmailService,
+    ResendEmailService,
     get_email_service,
 )
 from app.modules.auth.services.otp_service import InvalidEmailError, OtpCodeService
@@ -45,5 +46,6 @@ __all__ = [
     "RefreshTokenError",
     "RefreshTokenResult",
     "RefreshTokenService",
+    "ResendEmailService",
     "get_email_service",
 ]
