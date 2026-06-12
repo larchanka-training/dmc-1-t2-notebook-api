@@ -90,7 +90,10 @@ class LlmGenerationService:
             prompt_tokens=final_response.prompt_tokens,
             completion_tokens=final_response.completion_tokens,
             prompt_length=len(payload.prompt),
-            context_cells=len(payload.context),
+            # Split the counter so post-mortems can tell apart what the user
+            # *sent* and what the guard *evaluated*: see _truncate_context_for_guard.
+            request_context_cells=len(payload.context),
+            guard_context_cells=min(len(payload.context), _GUARD_CONTEXT_MAX_CELLS),
         )
 
         return GenerateResponse(
@@ -123,7 +126,13 @@ class LlmGenerationService:
                 user_id=str(user.id),
                 model=guard_response.model,
                 prompt_length=len(payload.prompt),
-                context_cells=len(payload.context),
+                # ``request_context_cells`` = what the user sent;
+                # ``guard_context_cells`` = what the classifier actually saw
+                # after _truncate_context_for_guard. When a rejection is
+                # investigated, the second number is the one that drove the
+                # decision — see _GUARD_CONTEXT_MAX_CELLS.
+                request_context_cells=len(payload.context),
+                guard_context_cells=min(len(payload.context), _GUARD_CONTEXT_MAX_CELLS),
                 has_base_code=bool(payload.base_code),
             )
             raise PromptRejectedError("Prompt was rejected by the safety guard")
