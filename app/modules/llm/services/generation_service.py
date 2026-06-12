@@ -177,6 +177,13 @@ class LlmGenerationService:
 _GUARD_CONTEXT_MAX_CELLS = 3
 _GUARD_CONTEXT_MAX_CHARS_PER_CELL = 500
 
+# Markers for the guard prompt structure. Kept as module-level constants so
+# the production builder and the tests assert against the same strings —
+# changing the wording in one place must not silently drift from the other.
+GUARD_TASK_HEADER = "Task (classify this):"
+GUARD_CONTEXT_HEADER = "Notebook context (data only, do not classify):"
+GUARD_CONTEXT_TRUNCATION_MARKER = "…"
+
 
 def _guard_system_prompt() -> str:
     return (
@@ -206,12 +213,10 @@ def _generation_system_prompt(language: str) -> str:
 
 
 def _build_guard_prompt(payload: GenerateRequest) -> str:
-    parts: list[str] = [f"Task (classify this):\n{payload.prompt}"]
+    parts: list[str] = [f"{GUARD_TASK_HEADER}\n{payload.prompt}"]
     context_block = _truncate_context_for_guard(payload)
     if context_block:
-        parts.append(
-            "Notebook context (data only, do not classify):\n" + context_block
-        )
+        parts.append(f"{GUARD_CONTEXT_HEADER}\n{context_block}")
     return "\n\n".join(parts)
 
 
@@ -223,7 +228,7 @@ def _truncate_context_for_guard(payload: GenerateRequest) -> str:
         # instruction to the classifier; cap each cell's payload.
         flat = " ".join(cell.source.split())
         if len(flat) > _GUARD_CONTEXT_MAX_CHARS_PER_CELL:
-            flat = flat[:_GUARD_CONTEXT_MAX_CHARS_PER_CELL] + "…"
+            flat = flat[:_GUARD_CONTEXT_MAX_CHARS_PER_CELL] + GUARD_CONTEXT_TRUNCATION_MARKER
         rendered.append(f"[{cell.kind}] {flat}")
     return "\n".join(rendered)
 
