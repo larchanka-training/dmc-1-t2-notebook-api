@@ -2079,6 +2079,53 @@
         ]
       }
     },
+    "/api/v1/notebooks/features-demo/restore": {
+      "post": {
+        "description": "``POST /notebooks/features-demo/restore`` — restore the user's demo.\n\nResurrect-only: воскрешает soft-deleted feature-demo текущего\nпользователя (по детерминированному ``demo_id``), идемпотентно\nвозвращает уже активный, и отдаёт 404, если его никогда не было.\nПроизвольный notebook этим эндпоинтом восстановить нельзя — id не\nпринимается. Подробности — в :meth:`NotebookService.restore_features_demo`.\n\nArgs:\n    current_user: Авторизованный пользователь.\n    service: DI-инстанс сервиса.\n\nReturns:\n    Восстановленный :class:`NotebookResponse`.",
+        "operationId": "restore_features_demo_api_v1_notebooks_features_demo_restore_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "No feature-demo notebook to restore"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Restore feature-demo notebook",
+        "tags": [
+          "Notebooks"
+        ]
+      }
+    },
     "/api/v1/notebooks/{notebook_id}": {
       "delete": {
         "description": "``DELETE /notebooks/{id}`` — soft-delete a notebook.\n\nФизически запись остаётся в БД, но получает ``deleted_at``. Все\nпоследующие чтения по этому id будут отдавать 404.\n\nArgs:\n    notebook_id: UUID ноутбука.\n    current_user: Авторизованный пользователь.\n    service: DI-инстанс сервиса.",
