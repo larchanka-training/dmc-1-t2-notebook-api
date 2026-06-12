@@ -1,6 +1,75 @@
 {
   "components": {
     "schemas": {
+      "AiContextResponse": {
+        "description": "Persisted, budget-fit AI context for a notebook.",
+        "properties": {
+          "context": {
+            "items": {
+              "$ref": "#/components/schemas/LlmContextCell"
+            },
+            "title": "Context",
+            "type": "array"
+          },
+          "historyCount": {
+            "default": 0,
+            "title": "Historycount",
+            "type": "integer"
+          },
+          "notebookId": {
+            "format": "uuid",
+            "title": "Notebookid",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "title": "Summary",
+            "type": "string"
+          },
+          "updatedAt": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updatedat"
+          }
+        },
+        "required": [
+          "notebookId"
+        ],
+        "title": "AiContextResponse",
+        "type": "object"
+      },
+      "AiContextStoreRequest": {
+        "description": "Body for ``PUT /notebooks/{id}/ai-context`` — the freshly built context.\n\nThis carries the *raw* history the front-end assembled; the server rolls it\nup to the generation budget before storing (see the AI-context service).",
+        "properties": {
+          "context": {
+            "items": {
+              "$ref": "#/components/schemas/LlmContextCell"
+            },
+            "title": "Context",
+            "type": "array"
+          },
+          "historyCount": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Historycount"
+          }
+        },
+        "title": "AiContextStoreRequest",
+        "type": "object"
+      },
       "ApiError": {
         "description": "Payload of a single API error.\n\nСодержимое поля ``error`` в ответе. Используется FE для\nлокализации и анализа: код (``code``) стабилен и пригоден для\n``switch``-логики, ``message`` — текст для пользователя/лога,\n``fields`` — пер-полевые ошибки валидации.",
         "properties": {
@@ -664,13 +733,16 @@
         "type": "object"
       },
       "LlmContextCell": {
-        "description": "Neighboring notebook cell sent as generation context.",
+        "description": "Neighboring notebook cell (or digest) sent as generation context.",
         "properties": {
           "kind": {
             "enum": [
               "code",
               "markdown",
-              "text"
+              "text",
+              "output",
+              "globals",
+              "summary"
             ],
             "title": "Kind",
             "type": "string"
@@ -2182,6 +2254,242 @@
           "Notebooks"
         ]
       }
+    },
+    "/api/v1/notebooks/{notebook_id}/ai-context": {
+      "delete": {
+        "description": "Drop the stored context (front-end rebuild-on-delete clears it here).",
+        "operationId": "delete_ai_context_api_v1_notebooks__notebook_id__ai_context_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "notebook_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Notebook Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Notebook owned by another user"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Notebook not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Clear the stored AI generation context for a notebook",
+        "tags": [
+          "AI Context"
+        ]
+      },
+      "get": {
+        "description": "Return the persisted, budget-fit context (empty default if never built).",
+        "operationId": "get_ai_context_api_v1_notebooks__notebook_id__ai_context_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "notebook_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Notebook Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiContextResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Notebook owned by another user"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Notebook not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get the stored AI generation context for a notebook",
+        "tags": [
+          "AI Context"
+        ]
+      },
+      "put": {
+        "description": "Roll the front-end-built context up to the generation budget and persist.",
+        "operationId": "put_ai_context_api_v1_notebooks__notebook_id__ai_context_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "notebook_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Notebook Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiContextStoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiContextResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Notebook owned by another user"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Notebook not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Body too large or stored context exceeds the byte limit"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Store (and roll up) the AI generation context for a notebook",
+        "tags": [
+          "AI Context"
+        ]
+      }
     }
   },
   "tags": [
@@ -2204,6 +2512,10 @@
     {
       "description": "Cloud code-generation endpoint backed by AWS Bedrock, protected by Bearer auth, prompt guard checks, rate limiting, and output validation.",
       "name": "LLM"
+    },
+    {
+      "description": "Per-notebook AI generation context: store the front-end-built context, roll it up to the generation budget via a pluggable summary service, and read it back (docs/ai-architecture.md §4.3).",
+      "name": "AI Context"
     },
     {
       "description": "Backend code-execution debug/fallback endpoint. Disabled by default (ENABLE_EXECUTE=false); when enabled it sits behind Bearer auth. The subprocess runner is NOT a production sandbox (docs/execution-architecture.md §12).",
