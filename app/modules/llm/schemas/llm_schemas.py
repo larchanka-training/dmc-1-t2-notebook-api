@@ -11,12 +11,23 @@ from pydantic.alias_generators import to_camel
 MAX_PROMPT_LENGTH = 8_000
 MAX_CONTEXT_SOURCE_LENGTH = 8_000
 MAX_BASE_CODE_LENGTH = 8_000
+# Single source of truth for the generation context item ceiling: the request
+# field cap below AND the summary roll-up (ai_context) both use this.
+MAX_CONTEXT_ITEMS = 10
+
+# Context-item kinds. ``code``/``markdown``/``text`` are verbatim neighbour-cell
+# source. ``output`` (a truncated cell output), ``globals`` (a compact
+# name/type/shape digest of the runtime global scope) and ``summary`` (the
+# budget-aware roll-up of older history, docs/ai-architecture.md §4.3) carry a
+# pre-formatted compact string in ``source`` and share the same byte budget, so
+# the size validator below applies to them unchanged.
+ContextCellKind = Literal["code", "markdown", "text", "output", "globals", "summary"]
 
 
 class LlmContextCell(BaseModel):
-    """Neighboring notebook cell sent as generation context."""
+    """Neighboring notebook cell (or digest) sent as generation context."""
 
-    kind: Literal["code", "markdown", "text"]
+    kind: ContextCellKind
     source: str = Field(..., max_length=MAX_CONTEXT_SOURCE_LENGTH)
 
 
@@ -29,7 +40,7 @@ class GenerateRequest(BaseModel):
     mode: Literal["generate", "edit"] = "generate"
     language: Literal["javascript", "typescript"] = "javascript"
     notebook_title: str | None = Field(default=None, max_length=200)
-    context: list[LlmContextCell] = Field(default_factory=list, max_length=10)
+    context: list[LlmContextCell] = Field(default_factory=list, max_length=MAX_CONTEXT_ITEMS)
     base_code: str | None = Field(default=None, max_length=MAX_BASE_CODE_LENGTH)
 
     @model_validator(mode="after")

@@ -10,11 +10,12 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.db import Base, get_db
 from app.main import app
+from app.modules.ai_context.models import NotebookAiContext
 from app.modules.auth.models import User
 from app.modules.auth.models.user import User as UserModel
 from app.modules.notebooks.models import Notebook
 
-_ = (User, Notebook)
+_ = (User, Notebook, NotebookAiContext)
 
 
 @pytest.fixture

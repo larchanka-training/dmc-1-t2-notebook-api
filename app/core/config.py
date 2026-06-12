@@ -17,6 +17,10 @@ DEV_JWT_SECRET = "dev-only-jwt-secret-change-me-32-bytes-minimum"
 DEV_OTP_HASH_SECRET = "dev-only-otp-hash-secret-change-me-32-bytes"
 LOCAL_ENVS = {"dev", "local", "test"}
 PRODUCTION_ENVS = {"production", "prod", "staging"}
+# Valid LLM_CONTEXT_SUMMARY_STRATEGY ids — mirrors the strategies registered in
+# app/modules/ai_context/services/summary.py (kept here to avoid an import cycle;
+# validated at startup so a typo fails fast, not on the first ai-context call).
+ALLOWED_SUMMARY_STRATEGIES = {"compact-oldest", "llm"}
 
 
 class Settings(BaseSettings):
@@ -66,6 +70,12 @@ class Settings(BaseSettings):
     llm_esbuild_command: str = "esbuild"
     llm_max_tokens: int = 2_048
     llm_temperature: float = 0.2
+    # AI context persistence + summary (Epic 07 / #116). The notebook context
+    # built on the FE is persisted server-side and rolled up by a pluggable,
+    # budget-aware summary service. See docs/ai-architecture.md §4.3.
+    # Strategy id for the summary service; switch implementations via env without
+    # touching call sites. Resolved by build_summary_service(); unknown → error.
+    llm_context_summary_strategy: str = "compact-oldest"
     # Backend code-execution endpoint (POST /api/v1/execute). Disabled by
     # default: it is a debug/fallback runner, not the production sandbox.
     # See docs/execution-architecture.md §12. The subprocess runner is NOT a
@@ -167,6 +177,11 @@ class Settings(BaseSettings):
             raise ValueError("EXECUTE_MAX_OUTPUT_BYTES must be positive")
         if self.execute_max_memory_mb <= 0:
             raise ValueError("EXECUTE_MAX_MEMORY_MB must be positive")
+        if self.llm_context_summary_strategy.strip() not in ALLOWED_SUMMARY_STRATEGIES:
+            allowed = ", ".join(sorted(ALLOWED_SUMMARY_STRATEGIES))
+            raise ValueError(
+                f"LLM_CONTEXT_SUMMARY_STRATEGY must be one of: {allowed}"
+            )
 
         if self.is_production_like:
             for field_name, value in [
