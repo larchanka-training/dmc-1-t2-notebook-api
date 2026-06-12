@@ -560,8 +560,9 @@ controllers не подключён.
 | `GET` | `/api/v1/notebooks/{id}` | Получить по id. 403 если `owner_id != current_user.id`. |
 | `PATCH` | `/api/v1/notebooks/{id}` | Обновление. Принимает полный массив `cells`, `title` и `deletedCells` (request-only tombstones). Conflict resolution — см. §8. |
 | `DELETE` | `/api/v1/notebooks/{id}` | Soft-delete: `deleted_at = now()`. |
+| `POST` | `/api/v1/notebooks/features-demo/restore` | Restore canonical feature-demo notebook (resurrect-only, без id в теле). См. §7.5. |
 
-**Errors (common to all 5 endpoints):**
+**Errors (common to all notebook endpoints):**
 - `401 invalid_token` — нет Bearer, битая подпись, истёкший access или
   сессия отозвана/истекла (см. §5.5).
 - `422 VALIDATION_ERROR` — body/schema validation, в стандартном
@@ -583,6 +584,28 @@ controllers не подключён.
 ```
 
 **`deletedCells`** — это «request-only tombstones»: список id ячеек, которые клиент удалил с момента последнего успешного sync. Сервер использует их в алгоритме merge (§8.1), но в БД НЕ хранит. После успешного PATCH клиент очищает свой локальный буфер `deletedCells` для этого ноутбука.
+
+### 7.5. Canonical feature-demo notebook
+
+У каждого пользователя есть один «стартовый» feature-demo notebook — seed-ноутбук, который фронт создаёт сразу после первой авторизации. Бэку нужно устойчиво отличать его от обычных ноутбуков.
+
+**Identity — детерминированный per-user id**, без отдельного поля в модели и без миграции:
+
+```
+demo_id(owner_id) = uuidv5(DEMO_NAMESPACE, str(owner_id))
+```
+
+`DEMO_NAMESPACE = 7f3a2b14-9c8d-4e6f-b1a2-c3d4e5f60718` — фиксированная константа-контракт, общая для backend (`app/modules/notebooks/demo.py`) и frontend ([UI #67](https://github.com/larchanka-training/dmc-1-t2-notebook-ui/issues/67)). Менять нельзя: смена namespace осиротит существующие demo-notebooks. ID предсказуем (любой вычислит чужой), но доступа не даёт — restore скоупится по `current_user` + owner-check.
+
+**`POST /api/v1/notebooks/features-demo/restore`** — resurrect-only:
+
+- soft-deleted demo → сбрасывает `deleted_at`, сохраняет прежние `cells`, `200`;
+- active demo → идемпотентно возвращает существующий (без дублей), `200`;
+- demo не найден **или** запись на этом id принадлежит другому owner → `404 NOTEBOOK_NOT_FOUND`.
+
+Эндпоинт не принимает id и не делает общий restore произвольных ноутбуков. Backend намеренно НЕ создаёт seed-контент при отсутствии demo: его сидит фронт на boot, поэтому «никогда не создавался» — явная ошибка, а не повод выдумывать ноутбук.
+
+> Frontend-сторона restore (страница `/usage`, кнопка) и парный `ui/docs/auth.md` — в [UI #67](https://github.com/larchanka-training/dmc-1-t2-notebook-ui/issues/67).
 
 ---
 
