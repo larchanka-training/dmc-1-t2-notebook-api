@@ -72,6 +72,43 @@ def create_notebook(
     return notebook
 
 
+@router.post(
+    "/features-demo/restore",
+    response_model=NotebookResponse,
+    responses={
+        401: {
+            "model": ApiErrorResponse,
+            "description": "Missing or invalid access token",
+        },
+        404: {
+            "model": ApiErrorResponse,
+            "description": "No feature-demo notebook to restore",
+        },
+    },
+    summary="Restore feature-demo notebook",
+)
+def restore_features_demo(
+    current_user: CurrentUser = Depends(get_current_user),
+    service: NotebookService = Depends(get_notebook_service),
+) -> NotebookResponse:
+    """``POST /notebooks/features-demo/restore`` — restore the user's demo.
+
+    Resurrect-only: воскрешает soft-deleted feature-demo текущего
+    пользователя (по детерминированному ``demo_id``), идемпотентно
+    возвращает уже активный, и отдаёт 404, если его никогда не было.
+    Произвольный notebook этим эндпоинтом восстановить нельзя — id не
+    принимается. Подробности — в :meth:`NotebookService.restore_features_demo`.
+
+    Args:
+        current_user: Авторизованный пользователь.
+        service: DI-инстанс сервиса.
+
+    Returns:
+        Восстановленный :class:`NotebookResponse`.
+    """
+    return service.restore_features_demo(current_user)
+
+
 @router.get(
     "",
     response_model=NotebookListResponse,
