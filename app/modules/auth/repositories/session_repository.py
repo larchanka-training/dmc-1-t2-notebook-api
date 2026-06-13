@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.modules.auth.models.auth_session import AuthSession
+from app.modules.auth.models.user import User
 
 
 class AuthSessionRepository:
@@ -47,6 +48,29 @@ class AuthSessionRepository:
             AuthSession.expires_at > now,
         )
         return self.db.execute(statement).scalar_one_or_none()
+
+    def get_active_with_user(
+        self,
+        *,
+        session_id: UUID,
+        user_id: UUID,
+        now: datetime,
+    ) -> tuple[AuthSession, User] | None:
+        """Return an active session and its user in one DB round-trip."""
+        statement = (
+            select(AuthSession, User)
+            .join(User, AuthSession.user_id == User.id)
+            .where(
+                AuthSession.id == session_id,
+                AuthSession.user_id == user_id,
+                AuthSession.revoked_at.is_(None),
+                AuthSession.expires_at > now,
+            )
+        )
+        row = self.db.execute(statement).one_or_none()
+        if row is None:
+            return None
+        return row[0], row[1]
 
     def revoke(self, session: AuthSession, revoked_at: datetime) -> AuthSession:
         """Mark a session as revoked."""
