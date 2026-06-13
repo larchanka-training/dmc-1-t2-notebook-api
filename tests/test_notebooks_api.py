@@ -632,3 +632,62 @@ def test_restore_features_demo_requires_bearer(client: TestClient) -> None:
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "invalid_token"
+
+
+def test_restore_features_demo_rejects_foreign_owned_demo_id(
+    client: TestClient,
+) -> None:
+    """Owner guard at the HTTP boundary: a notebook another user parked at
+    the victim's ``demo_id`` must not be restorable by the victim."""
+    attacker_headers, _, _ = _login(client, "attacker@example.com")
+    victim_headers, victim_id, _ = _login(client, "victim@example.com")
+    victim_demo = str(demo_id(UUID(victim_id)))
+
+    squat = client.post(
+        f"{settings.api_prefix}/notebooks",
+        json=_payload(victim_demo),
+        headers=attacker_headers,
+    )
+    assert squat.status_code == 201
+
+    response = client.post(
+        f"{settings.api_prefix}{_RESTORE_PATH}",
+        headers=victim_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NOTEBOOK_NOT_FOUND"
+
+
+def test_restore_features_demo_ignores_request_body_id(client: TestClient) -> None:
+    """The endpoint takes no id; a JSON body must not turn it into an
+    arbitrary-notebook restore."""
+    headers, _, _ = _login(client, "body-binding@example.com")
+    regular_id = str(uuid4())
+    created = client.post(
+        f"{settings.api_prefix}/notebooks",
+        json=_payload(regular_id),
+        headers=headers,
+    )
+    assert created.status_code == 201
+    deleted = client.delete(
+        f"{settings.api_prefix}/notebooks/{regular_id}",
+        headers=headers,
+    )
+    assert deleted.status_code == 204
+
+    response = client.post(
+        f"{settings.api_prefix}{_RESTORE_PATH}",
+        json={"id": regular_id},
+        headers=headers,
+    )
+
+    # Body ignored → only the (absent) canonical demo is targeted → 404.
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NOTEBOOK_NOT_FOUND"
+    # And the smuggled notebook stays soft-deleted.
+    still_gone = client.get(
+        f"{settings.api_prefix}/notebooks/{regular_id}",
+        headers=headers,
+    )
+    assert still_gone.status_code == 404
