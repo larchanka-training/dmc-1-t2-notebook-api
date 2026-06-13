@@ -313,6 +313,10 @@ timestamps в FE/BE JSON-контрактах.
 - `400 invalid_email` — невалидный формат.
 - `422 VALIDATION_ERROR` — body/schema validation error, в стандартном
   `ApiErrorResponse` envelope.
+- `503 email_delivery_failed` — production-like env, `ResendEmailService`
+  не смог отправить письмо (provider error, timeout, неверный API key/sender).
+  OTP-запись в этом случае не коммитится (rollback в `get_db`), поэтому повтор
+  запроса безопасен.
 
 `429 too_many_otp_requests` — целевое поведение после отдельной задачи по rate
 limiting (§11); текущий TARDIS-75 срез его ещё не реализует.
@@ -320,8 +324,9 @@ limiting (§11); текущий TARDIS-75 срез его ещё не реали
 **Side effects:**
 - Все предыдущие неиспользованные OTP этого email помечаются `used_at = now()` (инвалидация).
 - Создаётся новая запись в `otps` с `expires_at = now() + 5 мин`.
-- Email нормализуется и передаётся в `EmailService`. Текущая реализация
-  delivery boundary — no-op/stub; реальный provider выбирается отдельно.
+- Email нормализуется и передаётся в `EmailService`. В local-like env —
+  `NoopEmailService` (no-op, только лог). В production-like env —
+  `ResendEmailService`, реальная отправка через Resend API.
 
 ### 5.2. `POST /api/v1/auth/otp/verify`
 
@@ -793,8 +798,9 @@ VM) отдаёт nginx (`proxy/`), не backend-приложение. Измен
 | `OTP_MAX_ATTEMPTS` | `5` | Неудачных попыток до инвалидации. |
 | `OTP_RATE_LIMIT_PER_EMAIL` | `3` | Запросов / 15 мин. |
 | `ALLOW_PLACEHOLDER_AUTH` | auto | Optional override. Работает только в local-like env; в production-like env запрещён validation’ом. |
-| `RESEND_API_KEY` | `""` | API-ключ [Resend](https://resend.com) для отправки OTP-писем. Required в production-like env (validation падает, если пусто). В local-like env не используется — `NoopEmailService` ничего не отправляет. |
-| `EMAIL_FROM` | `noreply@example.com` | Email-адрес отправителя для OTP-писем через Resend. |
+| `RESEND_API_KEY` | `""` | API-ключ [Resend](https://resend.com) для отправки OTP-писем. Required в production-like env (validation падает, если пусто). Также используется как сигнал для factory: `get_email_service` выбирает `ResendEmailService` только для `is_production_like`, остальные env (включая нераспознанные) получают `NoopEmailService`. |
+| `EMAIL_FROM` | `noreply@example.com` | Email-адрес отправителя для OTP-писем через Resend. В production-like env должен быть переопределён на verified sender domain — дефолт `noreply@example.com` и значения, не похожие на email, отвергаются validation'ом (Resend всё равно отклонит отправку с unverified `example.com`). |
+| `RESEND_REQUEST_TIMEOUT_SECONDS` | `10` | HTTP timeout для вызовов Resend SDK. `POST /auth/otp/request` — sync route; без явного timeout'a hung-соединение к Resend заняло бы worker thread на дефолтные 30 секунд. |
 
 Существующие в `app/core/config.py` residual-переменные `token_ttl_seconds`
 (86400), `session_ttl_seconds` (604800) и `oauth_name_*` не используются новой

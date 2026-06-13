@@ -1,9 +1,15 @@
 from datetime import UTC, datetime
 
+import pytest
 import resend
 
 from app.core.config import Settings
-from app.modules.auth.services import NoopEmailService, ResendEmailService, get_email_service
+from app.modules.auth.services import (
+    EmailDeliveryError,
+    NoopEmailService,
+    ResendEmailService,
+    get_email_service,
+)
 from app.modules.auth.services import email_service as email_service_module
 
 
@@ -73,4 +79,35 @@ def test_resend_email_service_does_not_log_raw_code(
 
     assert len(log_calls) == 1
     _, kwargs = log_calls[0]
+    assert "123456" not in repr(kwargs)
+
+
+def test_resend_email_service_wraps_provider_errors_and_does_not_log_raw_code(
+    monkeypatch: object,
+) -> None:
+    def failing_send(params: dict[str, object]) -> dict[str, str]:
+        raise RuntimeError("Request failed: connection error")
+
+    monkeypatch.setattr(resend.Emails, "send", failing_send)  # type: ignore[attr-defined]
+
+    log_calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeLogger:
+        def info(self, event: str, **kwargs: object) -> None:
+            log_calls.append((event, kwargs))
+
+    monkeypatch.setattr(email_service_module, "logger", FakeLogger())
+
+    service = ResendEmailService(api_key="re_test_key", from_email="auth@notebook.example")
+
+    with pytest.raises(EmailDeliveryError):
+        service.send_otp(
+            email="user@example.com",
+            code="123456",
+            expires_at=datetime(2026, 6, 11, 10, 5, tzinfo=UTC),
+        )
+
+    assert len(log_calls) == 1
+    event, kwargs = log_calls[0]
+    assert event == "auth.otp.email.failed"
     assert "123456" not in repr(kwargs)
