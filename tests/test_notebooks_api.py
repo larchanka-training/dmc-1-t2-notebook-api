@@ -540,11 +540,13 @@ _RESTORE_PATH = "/notebooks/features-demo/restore"
 def test_restore_features_demo_resurrects_soft_deleted(client: TestClient) -> None:
     headers, user_id, _ = _login(client)
     nb_id = str(demo_id(UUID(user_id)))
-    client.post(
+    created = client.post(
         f"{settings.api_prefix}/notebooks",
         json=_payload(nb_id),
         headers=headers,
     )
+    assert created.status_code == 201
+    created_body = created.json()
     deleted = client.delete(
         f"{settings.api_prefix}/notebooks/{nb_id}",
         headers=headers,
@@ -559,7 +561,10 @@ def test_restore_features_demo_resurrects_soft_deleted(client: TestClient) -> No
     assert restored.status_code == 200
     body = restored.json()
     assert body["id"] == nb_id
-    assert body["cells"][0]["content"] == "console.log(1)"
+    # All cells preserved verbatim, not just cells[0].content.
+    assert body["cells"] == created_body["cells"]
+    # Exact resurrection: top-level updatedAt is not bumped on restore.
+    assert body["updatedAt"] == created_body["updatedAt"]
 
     # Visible again afterwards.
     fetched = client.get(
@@ -572,11 +577,12 @@ def test_restore_features_demo_resurrects_soft_deleted(client: TestClient) -> No
 def test_restore_features_demo_is_idempotent_when_active(client: TestClient) -> None:
     headers, user_id, _ = _login(client)
     nb_id = str(demo_id(UUID(user_id)))
-    client.post(
+    created = client.post(
         f"{settings.api_prefix}/notebooks",
         json=_payload(nb_id),
         headers=headers,
     )
+    assert created.status_code == 201
 
     first = client.post(f"{settings.api_prefix}{_RESTORE_PATH}", headers=headers)
     second = client.post(f"{settings.api_prefix}{_RESTORE_PATH}", headers=headers)
@@ -601,15 +607,17 @@ def test_restore_features_demo_is_owner_isolated(client: TestClient) -> None:
     alice_headers, alice_id, _ = _login(client, "alice@example.com")
     bob_headers, _, _ = _login(client, "bob@example.com")
     alice_demo = str(demo_id(UUID(alice_id)))
-    client.post(
+    created = client.post(
         f"{settings.api_prefix}/notebooks",
         json=_payload(alice_demo),
         headers=alice_headers,
     )
-    client.delete(
+    assert created.status_code == 201
+    deleted = client.delete(
         f"{settings.api_prefix}/notebooks/{alice_demo}",
         headers=alice_headers,
     )
+    assert deleted.status_code == 204
 
     # Bob's restore only ever targets his own (absent) demo → 404.
     bob_restore = client.post(
