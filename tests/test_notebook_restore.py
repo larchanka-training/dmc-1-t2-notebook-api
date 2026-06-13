@@ -60,6 +60,19 @@ def test_restore_resurrects_soft_deleted_demo_preserving_cells(
 
     assert restored.id == demo_id(user.id)
     assert restored.cells == created.cells  # прежние ячейки сохранены
+    # «Точное воскрешение»: метаданные не мутируют. updated_at несёт
+    # LWW-sync семантику — тихий бамп (напр. будущий onupdate) исказил бы
+    # порядок last-write-wins и без этого ассерта прошёл бы незаметно.
+    assert restored.updated_at == created.updated_at
+    assert restored.created_at == created.created_at
+    assert restored.title == created.title
+    assert restored.format_version == created.format_version
+    # Resurrect — единственный путь, реально зовущий save(): проверяем,
+    # что воскрешение не создало дубля.
+    _, total = NotebookRepository(db_session).list_by_owner(
+        user.id, 50, 0, "updatedAt", "desc"
+    )
+    assert total == 1
 
 
 def test_restore_is_idempotent_for_active_demo(db_session: Session) -> None:
