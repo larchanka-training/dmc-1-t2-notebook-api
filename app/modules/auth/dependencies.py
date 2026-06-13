@@ -149,11 +149,12 @@ def get_current_user(
             detail={"code": "invalid_token", "message": "Invalid or expired access token"},
         ) from exc
 
-    active_session = AuthSessionRepository(db).get_active_by_id(
-        claims.session_id,
-        datetime.now(UTC),
+    session_and_user = AuthSessionRepository(db).get_active_with_user(
+        session_id=claims.session_id,
+        user_id=claims.user_id,
+        now=datetime.now(UTC),
     )
-    if active_session is None or active_session.user_id != claims.user_id:
+    if session_and_user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
@@ -162,12 +163,7 @@ def get_current_user(
             },
         )
 
-    user = UserRepository(db).get_by_id(claims.user_id)
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "invalid_token", "message": "User not found"},
-        )
+    _, user = session_and_user
 
     return CurrentUser(
         id=user.id,

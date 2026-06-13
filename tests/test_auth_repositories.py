@@ -7,6 +7,7 @@ from app.modules.auth.repositories import (
     AuthSessionRepository,
     OtpRepository,
     RefreshTokenRepository,
+    UserRepository,
 )
 
 
@@ -97,6 +98,50 @@ def test_session_repository_filters_revoked_and_expired_sessions(
     repo.revoke(active, now + timedelta(seconds=1))
 
     assert repo.get_active_by_id(active.id, now) is None
+
+
+def test_session_repository_gets_active_session_with_user(
+    db_session: Session,
+) -> None:
+    session_repo = AuthSessionRepository(db_session)
+    user_repo = UserRepository(db_session)
+    now = datetime.now(UTC)
+    user = user_repo.get_or_create_by_email("user@example.com", now)
+    other_user = user_repo.get_or_create_by_email("other@example.com", now)
+    active = session_repo.create(
+        user_id=user.id,
+        created_at=now,
+        expires_at=now + timedelta(days=1),
+    )
+    expired = session_repo.create(
+        user_id=user.id,
+        created_at=now - timedelta(days=2),
+        expires_at=now - timedelta(days=1),
+    )
+
+    result = session_repo.get_active_with_user(
+        session_id=active.id,
+        user_id=user.id,
+        now=now,
+    )
+
+    assert result == (active, user)
+    assert (
+        session_repo.get_active_with_user(
+            session_id=active.id,
+            user_id=other_user.id,
+            now=now,
+        )
+        is None
+    )
+    assert (
+        session_repo.get_active_with_user(
+            session_id=expired.id,
+            user_id=user.id,
+            now=now,
+        )
+        is None
+    )
 
 
 def test_refresh_token_repository_marks_rotation_reuse_and_family_revocation(
