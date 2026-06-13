@@ -192,6 +192,7 @@ Notebook endpoints:
 | `GET /api/v1/notebooks/{id}` | Return a full notebook including `cells`. |
 | `PATCH /api/v1/notebooks/{id}` | Merge/update a notebook with LWW per-cell conflict handling. |
 | `DELETE /api/v1/notebooks/{id}` | Soft-delete a notebook. |
+| `POST /api/v1/notebooks/features-demo/restore` | Restore the caller's canonical feature-demo notebook (resurrect-only, no request body/id): clears `deleted_at` for a soft-deleted demo, idempotently returns an active one, `404 NOTEBOOK_NOT_FOUND` when it is missing or owned by another user. |
 
 LLM endpoint:
 
