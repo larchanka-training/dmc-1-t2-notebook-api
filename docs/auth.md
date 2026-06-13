@@ -597,6 +597,8 @@ demo_id(owner_id) = uuidv5(DEMO_NAMESPACE, str(owner_id))
 
 `DEMO_NAMESPACE = 7f3a2b14-9c8d-4e6f-b1a2-c3d4e5f60718` — фиксированная константа-контракт, общая для backend (`app/modules/notebooks/demo.py`) и frontend ([UI #67](https://github.com/larchanka-training/dmc-1-t2-notebook-ui/issues/67)). Менять нельзя: смена namespace осиротит существующие demo-notebooks. ID предсказуем (любой вычислит чужой), но доступа не даёт — restore скоупится по `current_user` + owner-check.
 
+> **Остаточный риск squatting — доступность, не доступ** (accepted trade-off). Другой owner может заранее занять чужой `demo_id` обычным `POST` (id клиентский, PK глобальный) → seed/restore жертвы упрётся в 403/404, пока слот не освободят. Заменить детерминированный id на owner-scoped marker нельзя — это контракт с фронтом. Вероятность мала: нужен чужой `owner_id` (UUIDv4), cross-user в API не отдаётся, demo — некритичный контент.
+
 **`POST /api/v1/notebooks/features-demo/restore`** — resurrect-only:
 
 - soft-deleted demo → сбрасывает `deleted_at`, сохраняет прежние `cells`, `200`;
