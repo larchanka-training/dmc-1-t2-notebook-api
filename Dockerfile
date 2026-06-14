@@ -1,5 +1,7 @@
 ARG ESBUILD_VERSION=0.21.5
 
+# Standalone esbuild CLI for the LLM syntax validator: the app calls it via
+# subprocess, so node/npm are build-time only and stay out of the runtime image.
 FROM node:22-slim AS esbuild
 
 ARG ESBUILD_VERSION
