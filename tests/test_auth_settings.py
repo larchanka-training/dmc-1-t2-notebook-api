@@ -61,6 +61,8 @@ def test_production_disables_placeholder_auth() -> None:
         app_env="production",
         jwt_secret="production-secret-value-at-least-32-chars",
         otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+        resend_api_key="re_test_key",
+        email_from="auth@notebook.example",
     )
 
     assert settings.placeholder_auth_enabled is False
@@ -104,7 +106,63 @@ def test_production_disables_backend_execute() -> None:
     assert settings.enable_execute is True
 
 
+def test_production_requires_resend_api_key() -> None:
+    with pytest.raises(ValidationError, match="RESEND_API_KEY"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            jwt_secret="production-secret-value-at-least-32-chars",
+            otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+        )
+
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        jwt_secret="production-secret-value-at-least-32-chars",
+        otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+        resend_api_key="re_test_key",
+        email_from="auth@notebook.example",
+    )
+
+    assert settings.resend_api_key == "re_test_key"
+
+
+def test_production_requires_non_default_email_from() -> None:
+    base_kwargs = {
+        "_env_file": None,
+        "app_env": "production",
+        "jwt_secret": "production-secret-value-at-least-32-chars",
+        "otp_hash_secret": "production-otp-hash-secret-at-least-32-chars",
+        "resend_api_key": "re_test_key",
+    }
+
+    # Default EMAIL_FROM is rejected: Resend will reject mail from an
+    # unverified example.com sender, surfacing as a delivery failure at
+    # request time even though startup validation would otherwise pass.
+    with pytest.raises(ValidationError, match="EMAIL_FROM"):
+        Settings(**base_kwargs)
+
+    # A value that doesn't look like an email address is also rejected.
+    with pytest.raises(ValidationError, match="EMAIL_FROM"):
+        Settings(**base_kwargs, email_from="not-an-email")
+
+    settings = Settings(**base_kwargs, email_from="auth@notebook.example")
+    assert settings.email_from == "auth@notebook.example"
+
+
 def test_get_email_service_returns_noop_boundary() -> None:
     settings = Settings(_env_file=None)
 
+    assert isinstance(get_email_service(settings), NoopEmailService)
+
+
+def test_get_email_service_returns_noop_for_unknown_env_without_resend_key() -> None:
+    # An unrecognized APP_ENV is neither local-like nor production-like, so
+    # validate_auth_settings does not require RESEND_API_KEY/EMAIL_FROM. The
+    # factory must agree and stay on the no-op boundary rather than handing
+    # an empty api key to the Resend SDK at request time.
+    settings = Settings(_env_file=None, app_env="preview")
+
+    assert settings.is_local_like is False
+    assert settings.is_production_like is False
     assert isinstance(get_email_service(settings), NoopEmailService)

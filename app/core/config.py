@@ -10,13 +10,17 @@ prod-ценная вещь (DB URL, OAuth-секрет, JSON-логи) долж�
 перекрыта переменной окружения при деплое.
 """
 
+import re
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEV_JWT_SECRET = "dev-only-jwt-secret-change-me-32-bytes-minimum"
 DEV_OTP_HASH_SECRET = "dev-only-otp-hash-secret-change-me-32-bytes"
+DEV_EMAIL_FROM = "noreply@example.com"
 LOCAL_ENVS = {"dev", "local", "test"}
 PRODUCTION_ENVS = {"production", "prod", "staging"}
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Valid LLM_CONTEXT_SUMMARY_STRATEGY ids — mirrors the strategies registered in
 # app/modules/ai_context/services/summary.py (kept here to avoid an import cycle;
 # validated at startup so a typo fails fast, not on the first ai-context call).
@@ -58,6 +62,9 @@ class Settings(BaseSettings):
     otp_max_attempts: int = 5
     otp_rate_limit_per_email: int = 3
     allow_placeholder_auth: bool | None = None
+    resend_api_key: str = ""
+    resend_request_timeout_seconds: int = 10
+    email_from: str = DEV_EMAIL_FROM
     llm_bedrock_region: str = "eu-north-1"
     llm_bedrock_guard_model_id: str = "eu.amazon.nova-micro-v1:0"
     llm_bedrock_generator_model_id: str = "eu.amazon.nova-lite-v1:0"
@@ -139,6 +146,8 @@ class Settings(BaseSettings):
             raise ValueError("OTP_MAX_ATTEMPTS must be positive")
         if self.otp_rate_limit_per_email <= 0:
             raise ValueError("OTP_RATE_LIMIT_PER_EMAIL must be positive")
+        if self.resend_request_timeout_seconds <= 0:
+            raise ValueError("RESEND_REQUEST_TIMEOUT_SECONDS must be positive")
         if self.llm_request_timeout_seconds <= 0:
             raise ValueError("LLM_REQUEST_TIMEOUT_SECONDS must be positive")
         if self.llm_max_prompt_bytes <= 0:
@@ -215,6 +224,16 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "ENABLE_EXECUTE cannot be enabled in production-like "
                     "environments until a hardened execution runtime exists"
+                )
+            if not self.resend_api_key:
+                raise ValueError(
+                    "RESEND_API_KEY must be set in production-like environments"
+                )
+            if self.email_from == DEV_EMAIL_FROM or not EMAIL_RE.match(self.email_from):
+                raise ValueError(
+                    "EMAIL_FROM must be set to a verified sender address "
+                    "(not the default 'noreply@example.com') in "
+                    "production-like environments"
                 )
         return self
 

@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 import pytest
+import resend
 
 from app.core.config import settings
 
@@ -60,6 +61,13 @@ def test_otp_request_hides_code_in_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "resend_api_key", "re_test_key")
+    sent_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        resend.Emails,
+        "send",
+        lambda params: sent_calls.append(params) or {"id": "email_123"},
+    )
 
     response = client.post(
         f"{settings.api_prefix}/auth/otp/request",
@@ -68,3 +76,5 @@ def test_otp_request_hides_code_in_production(
 
     assert response.status_code == 204
     assert response.content == b""
+    assert len(sent_calls) == 1
+    assert sent_calls[0]["to"] == "user@example.com"

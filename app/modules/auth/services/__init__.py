@@ -1,8 +1,10 @@
 """Auth services."""
 
 from app.modules.auth.services.email_service import (
+    EmailDeliveryError,
     EmailService,
     NoopEmailService,
+    ResendEmailService,
     get_email_service,
 )
 from app.modules.auth.services.otp_service import InvalidEmailError, OtpCodeService
@@ -31,6 +33,7 @@ __all__ = [
     "AccessTokenClaims",
     "AccessTokenError",
     "AccessTokenService",
+    "EmailDeliveryError",
     "EmailService",
     "InvalidEmailError",
     "LogoutResult",
@@ -45,5 +48,6 @@ __all__ = [
     "RefreshTokenError",
     "RefreshTokenResult",
     "RefreshTokenService",
+    "ResendEmailService",
     "get_email_service",
 ]

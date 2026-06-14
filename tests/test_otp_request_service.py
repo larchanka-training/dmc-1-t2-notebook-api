@@ -100,6 +100,8 @@ def test_otp_request_service_hides_raw_code_in_production_like_config(
             app_env="production",
             jwt_secret="production-secret-value-at-least-32-chars",
             otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+            resend_api_key="re_test_key",
+            email_from="auth@notebook.example",
         ),
     )
 
