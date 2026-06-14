@@ -31,7 +31,8 @@ def client() -> Generator[TestClient, None, None]:
 
 
 def test_app_boots_and_routes_registered(client: TestClient) -> None:
-    paths = {path for route in app.routes if (path := getattr(route, "path", None)) is not None}
+    schema = client.get(f"{settings.api_prefix}/openapi.json").json()
+    paths = set(schema["paths"])
     assert "/" in paths
     assert f"{settings.api_prefix}/health" in paths
     assert f"{settings.api_prefix}/health/ready" in paths
