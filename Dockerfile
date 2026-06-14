@@ -1,3 +1,19 @@
+ARG ESBUILD_VERSION=0.21.5
+
+FROM node:22-slim AS esbuild
+
+ARG ESBUILD_VERSION
+
+WORKDIR /esbuild
+
+RUN npm install --no-save --no-audit --no-fund "esbuild@${ESBUILD_VERSION}" \
+    && ESBUILD_BINARY="$(find node_modules/@esbuild -path '*/bin/esbuild' -type f | head -n 1)" \
+    && test -n "${ESBUILD_BINARY}" \
+    && cp "${ESBUILD_BINARY}" /usr/local/bin/esbuild \
+    && chmod +x /usr/local/bin/esbuild \
+    && /usr/local/bin/esbuild --version
+
+
 FROM python:3.14-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -15,22 +31,15 @@ RUN pip install --prefix=/install .
 
 FROM python:3.14-slim AS runtime
 
-ARG ESBUILD_VERSION=0.21.5
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm \
-    && npm install -g "esbuild@${ESBUILD_VERSION}" \
-    && npm cache clean --force \
-    && rm -rf /var/lib/apt/lists/*
-
 RUN addgroup --system app && adduser --system --ingroup app app
 
 COPY --from=builder /install /usr/local
+COPY --from=esbuild /usr/local/bin/esbuild /usr/local/bin/esbuild
 COPY app ./app
 
 USER app
