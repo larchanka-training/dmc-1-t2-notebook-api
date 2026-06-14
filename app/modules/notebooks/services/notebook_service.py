@@ -22,6 +22,7 @@ from fastapi import HTTPException, status
 
 from app.core.time import datetime_to_unix_ms, unix_ms_to_datetime
 from app.modules.auth.schemas.user_schemas import CurrentUser
+from app.modules.notebooks.demo import demo_id
 from app.modules.notebooks.entities import NotebookEntity
 from app.modules.notebooks.repositories.protocol import NotebookRepositoryProtocol
 from app.modules.notebooks.schemas.notebook_schemas import (
@@ -294,6 +295,45 @@ class NotebookService:
         notebook = self._get_active_notebook(notebook_id)
         self._ensure_owner(notebook, current_user)
         self.repository.soft_delete(notebook, datetime.now(UTC))
+
+    def restore_features_demo(self, current_user: CurrentUser) -> NotebookResponse:
+        """Restore the current user's canonical feature-demo notebook.
+
+        Resurrect-only. Эндпоинт не принимает id и не делает общий restore:
+        он вычисляет :func:`demo_id` от ``current_user.id`` и работает только
+        с этой записью:
+
+        * soft-deleted → сбрасывает ``deleted_at``, сохраняя прежние
+          ``cells`` и ``updated_at`` (точное воскрешение: логическое время
+          правки намеренно не бампится);
+        * active → идемпотентно возвращает существующую (без дублей);
+        * отсутствует **или** принадлежит другому owner → 404.
+
+        Owner-check здесь не декоративный: ``demo_id`` предсказуем, и другой
+        пользователь мог заранее занять этот id обычным ``POST``. Без проверки
+        restore вернул бы чужой ноутбук — поэтому foreign-owned запись
+        трактуется как «demo нет».
+
+        Backend намеренно НЕ создаёт seed-контент при отсутствии demo: его
+        сидит фронт на boot, поэтому «никогда не создавался» — явная ошибка,
+        а не повод выдумывать ноутбук.
+
+        Args:
+            current_user: Авторизованный пользователь.
+
+        Returns:
+            Восстановленный или уже активный :class:`NotebookResponse`.
+
+        Raises:
+            HTTPException: 404, если feature-demo notebook не найден.
+        """
+        notebook = self.repository.get_by_id(demo_id(current_user.id))
+        if notebook is None or notebook.owner_id != current_user.id:
+            raise notebook_not_found()
+        if notebook.deleted_at is not None:
+            notebook.deleted_at = None
+            notebook = self.repository.save(notebook)
+        return self.to_response(notebook)
 
     def _get_active_notebook(self, notebook_id: UUID) -> NotebookEntity:
         """Return notebook by id or raise 404 if missing/deleted.

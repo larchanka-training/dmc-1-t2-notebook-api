@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <changeSet id="ai_context-0004-notebook-ai-context" author="msd">
+        <comment>
+            Epic 07 / #116: per-notebook AI generation context.
+
+            One row per notebook holding the budget-fit context items
+            (rolled up to the 8 KiB / 10-item generation budget by the
+            summary service), the roll-up summary string, and a count of
+            how many raw cell histories fed the last build.
+
+            Lives in the 'notebooks' schema as a sub-resource of a
+            notebook. No cross-domain FK on notebook_id/owner_id: the
+            notebooks domain is kept free of DB coupling so it can move to
+            a NoSQL store later (api/docs/domain-boundaries.md §4);
+            ownership/existence is enforced in the service layer.
+        </comment>
+        <sql>
+            CREATE TABLE IF NOT EXISTS notebooks.notebook_ai_context (
+                notebook_id uuid PRIMARY KEY,
+                owner_id uuid NOT NULL,
+                context jsonb NOT NULL DEFAULT '[]'::jsonb,
+                summary text NOT NULL DEFAULT '',
+                history_count int NOT NULL DEFAULT 0 CHECK (history_count >= 0),
+                updated_at timestamptz NOT NULL DEFAULT now()
+            );
+
+            CREATE INDEX IF NOT EXISTS notebook_ai_context_owner_idx
+                ON notebooks.notebook_ai_context(owner_id);
+        </sql>
+
+        <rollback>
+            <sql>
+                DROP TABLE IF EXISTS notebooks.notebook_ai_context;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

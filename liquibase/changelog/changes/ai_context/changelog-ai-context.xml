@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <!--
+        AI context domain changelog. Owned by the ai_context module
+        (Epic 07 / #116). The table lives in the 'notebooks' schema
+        (created by changes/notebooks/0003-move-notebooks-schema.xml), so
+        this child is included after the notebooks child in the master.
+    -->
+
+    <include file="0004-notebook-ai-context.xml" relativeToChangelogFile="true"/>
+
+</databaseChangeLog>
