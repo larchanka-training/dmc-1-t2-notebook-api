@@ -56,6 +56,53 @@ def test_otp_verify_rejects_wrong_code_with_error_envelope(
     assert response.json()["error"]["code"] == "invalid_otp"
 
 
+def test_otp_request_rate_limit_returns_error_envelope(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "otp_rate_limit_per_email", 1)
+    monkeypatch.setattr(settings, "otp_rate_limit_window_seconds", 900)
+
+    first = client.post(
+        f"{settings.api_prefix}/auth/otp/request",
+        json={"email": "user@example.com"},
+    )
+    second = client.post(
+        f"{settings.api_prefix}/auth/otp/request",
+        json={"email": "user@example.com"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.json()["error"]["code"] == "too_many_otp_requests"
+
+
+def test_otp_verify_too_many_invalid_attempts_returns_error_envelope(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "otp_max_attempts", 2)
+    request_response = client.post(
+        f"{settings.api_prefix}/auth/otp/request",
+        json={"email": "user@example.com"},
+    )
+    assert request_response.status_code == 200
+
+    first = client.post(
+        f"{settings.api_prefix}/auth/otp/verify",
+        json={"email": "user@example.com", "otp": "000000"},
+    )
+    second = client.post(
+        f"{settings.api_prefix}/auth/otp/verify",
+        json={"email": "user@example.com", "otp": "111111"},
+    )
+
+    assert first.status_code == 401
+    assert first.json()["error"]["code"] == "invalid_otp"
+    assert second.status_code == 429
+    assert second.json()["error"]["code"] == "too_many_otp_attempts"
+
+
 def test_otp_request_hides_code_in_production(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

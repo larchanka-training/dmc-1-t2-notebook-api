@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <changeSet id="users-0005-otp-failed-attempts" author="msd">
+        <comment>
+            TARDIS-75 hardening: track failed OTP verification attempts per OTP
+            row so excessive invalid attempts can invalidate the code.
+        </comment>
+
+        <addColumn schemaName="users" tableName="otps">
+            <column name="failed_attempts" type="integer" defaultValueNumeric="0">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

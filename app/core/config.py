@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     otp_ttl_seconds: int = 300
     otp_max_attempts: int = 5
     otp_rate_limit_per_email: int = 3
+    otp_rate_limit_window_seconds: int = 900
     allow_placeholder_auth: bool | None = None
     resend_api_key: str = ""
     resend_request_timeout_seconds: int = 10
@@ -146,6 +147,8 @@ class Settings(BaseSettings):
             raise ValueError("OTP_MAX_ATTEMPTS must be positive")
         if self.otp_rate_limit_per_email <= 0:
             raise ValueError("OTP_RATE_LIMIT_PER_EMAIL must be positive")
+        if self.otp_rate_limit_window_seconds <= 0:
+            raise ValueError("OTP_RATE_LIMIT_WINDOW_SECONDS must be positive")
         if self.resend_request_timeout_seconds <= 0:
             raise ValueError("RESEND_REQUEST_TIMEOUT_SECONDS must be positive")
         if self.llm_request_timeout_seconds <= 0:

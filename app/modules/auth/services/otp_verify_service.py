@@ -22,6 +22,10 @@ class OtpVerifyError(ValueError):
     """Raised when OTP verification cannot authenticate the user."""
 
 
+class OtpVerifyRateLimitError(OtpVerifyError):
+    """Raised when an OTP has too many failed verification attempts."""
+
+
 @dataclass(frozen=True)
 class OtpVerifyResult:
     """Result of a successful OTP verification before HTTP response shaping."""
@@ -72,7 +76,14 @@ class OtpVerifyService:
         )
         if otp_row is None:
             raise OtpVerifyError("invalid_otp")
+        if otp_row.failed_attempts >= self._config.otp_max_attempts:
+            self._otp_repository.mark_used(otp_row, verified_at)
+            raise OtpVerifyRateLimitError("too_many_otp_attempts")
         if not self._code_service.verify_otp(otp, otp_row.otp_hash):
+            self._otp_repository.increment_failed_attempts(otp_row)
+            if otp_row.failed_attempts >= self._config.otp_max_attempts:
+                self._otp_repository.mark_used(otp_row, verified_at)
+                raise OtpVerifyRateLimitError("too_many_otp_attempts")
             raise OtpVerifyError("invalid_otp")
 
         self._otp_repository.mark_used(otp_row, verified_at)

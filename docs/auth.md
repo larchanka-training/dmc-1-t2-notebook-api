@@ -318,8 +318,8 @@ timestamps в FE/BE JSON-контрактах.
   OTP-запись в этом случае не коммитится (rollback в `get_db`), поэтому повтор
   запроса безопасен.
 
-`429 too_many_otp_requests` — целевое поведение после отдельной задачи по rate
-limiting (§11); текущий TARDIS-75 срез его ещё не реализует.
+`429 too_many_otp_requests` — превышен лимит выдачи OTP для email в текущем
+окне rate limit (§11).
 
 **Side effects:**
 - Все предыдущие неиспользованные OTP этого email помечаются `used_at = now()` (инвалидация).
@@ -351,13 +351,14 @@ limiting (§11); текущий TARDIS-75 срез его ещё не реали
 - `401 invalid_otp` — нет активного OTP, код не совпал, код истёк или уже был
   использован. Текущий backend не раскрывает отдельную причину в `error.code`,
   чтобы не усложнять первый MVP-срез.
+- `429 too_many_otp_attempts` — активный OTP получил слишком много неверных
+  попыток; код инвалидирован, пользователю нужно запросить новый OTP.
 - `422 VALIDATION_ERROR` — body/schema validation error, в стандартном
   `ApiErrorResponse` envelope.
 
-`otp_expired`, `otp_already_used` и per-OTP attempt counter — целевое
-дальнейшее уточнение контракта. Если эти коды будут добавлены, одновременно
-обновляются `api/docs/openapi.json`, `ui/openapi/auth.openapi.yaml` и
-`ui/docs/auth.md`.
+`otp_expired`, `otp_already_used` — целевое дальнейшее уточнение контракта. Если
+эти коды будут добавлены, одновременно обновляются `api/docs/openapi.json`,
+`ui/openapi/auth.openapi.yaml` и `ui/docs/auth.md`.
 
 **Side effects:**
 - Если user с этим email не существует — создаётся.
@@ -788,8 +789,8 @@ while notebook.format_version < CURRENT_FORMAT_VERSION:
 
 | Endpoint | Limit |
 |---|---|
-| `POST /api/v1/auth/otp/request` | 3 запроса / 15 мин на email. Сверх этого — важен и пер-IP limit (например 20 / 15 мин). |
-| `POST /api/v1/auth/otp/verify` | 10 попыток / 15 мин на email. Дополнительно: 5 неудачных попыток на один OTP → инвалидация этого OTP. |
+| `POST /api/v1/auth/otp/request` | Реализовано: 3 запроса / 15 мин на email (`OTP_RATE_LIMIT_PER_EMAIL`, `OTP_RATE_LIMIT_WINDOW_SECONDS`) → `429 too_many_otp_requests`. Per-IP limit (например 20 / 15 мин) остаётся future hardening. |
+| `POST /api/v1/auth/otp/verify` | Реализовано: 5 неудачных попыток на один OTP (`OTP_MAX_ATTEMPTS`) → OTP инвалидируется и возвращается `429 too_many_otp_attempts`. Отдельный rolling limit 10 попыток / 15 мин на email остаётся future hardening. |
 | `POST /api/v1/auth/refresh` | 60 / мин на sessionId. Reuse старого refresh → отзыв всей family и самой сессии (не всех сессий пользователя, см. §5.3). |
 
 - **CAPTCHA** — не в v1. Добавим если появятся злоупотребления.
@@ -822,6 +823,7 @@ VM) отдаёт nginx (`proxy/`), не backend-приложение. Измен
 | `OTP_TTL_SECONDS` | `300` | 5 минут. |
 | `OTP_MAX_ATTEMPTS` | `5` | Неудачных попыток до инвалидации. |
 | `OTP_RATE_LIMIT_PER_EMAIL` | `3` | Запросов / 15 мин. |
+| `OTP_RATE_LIMIT_WINDOW_SECONDS` | `900` | Окно rate limit для `OTP_RATE_LIMIT_PER_EMAIL`. |
 | `ALLOW_PLACEHOLDER_AUTH` | auto | Optional override. Работает только в local-like env; в production-like env запрещён validation’ом. |
 | `RESEND_API_KEY` | `""` | API-ключ [Resend](https://resend.com) для отправки OTP-писем. Required в production-like env (validation падает, если пусто). Также используется как сигнал для factory: `get_email_service` выбирает `ResendEmailService` только для `is_production_like`, остальные env (включая нераспознанные) получают `NoopEmailService`. |
 | `EMAIL_FROM` | `noreply@example.com` | Email-адрес отправителя для OTP-писем через Resend. В production-like env должен быть переопределён на verified sender domain — дефолт `noreply@example.com` и значения, не похожие на email, отвергаются validation'ом (Resend всё равно отклонит отправку с unverified `example.com`). |
