@@ -10,11 +10,13 @@ from app.modules.auth.services.email_service import (
 from app.modules.auth.services.otp_service import InvalidEmailError, OtpCodeService
 from app.modules.auth.services.logout_service import LogoutResult, LogoutService
 from app.modules.auth.services.otp_request_service import (
+    OtpRateLimitError,
     OtpRequestResult,
     OtpRequestService,
 )
 from app.modules.auth.services.otp_verify_service import (
     OtpVerifyError,
+    OtpVerifyRateLimitError,
     OtpVerifyResult,
     OtpVerifyService,
 )
@@ -40,9 +42,11 @@ __all__ = [
     "LogoutService",
     "NoopEmailService",
     "OtpCodeService",
+    "OtpRateLimitError",
     "OtpRequestResult",
     "OtpRequestService",
     "OtpVerifyError",
+    "OtpVerifyRateLimitError",
     "OtpVerifyResult",
     "OtpVerifyService",
     "RefreshTokenError",

@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.modules.auth.models.otp import Otp
@@ -65,6 +65,14 @@ class OtpRepository:
         )
         return self.db.execute(statement).scalar_one_or_none()
 
+    def count_recent_by_email(self, email: str, since: datetime) -> int:
+        """Return how many OTP rows were created for an email since a timestamp."""
+        statement = select(func.count()).select_from(Otp).where(
+            Otp.email == email,
+            Otp.created_at >= since,
+        )
+        return int(self.db.execute(statement).scalar_one())
+
     def mark_active_as_used_for_email(self, email: str, used_at: datetime) -> int:
         """Mark all currently unused OTP rows for an email as used."""
         statement = (
@@ -78,6 +86,13 @@ class OtpRepository:
         result = self.db.execute(statement)
         self.db.flush()
         return result.rowcount or 0
+
+    def increment_failed_attempts(self, otp: Otp) -> Otp:
+        """Increment the failed verification counter for an OTP row."""
+        otp.failed_attempts += 1
+        self.db.add(otp)
+        self.db.flush()
+        return otp
 
     def mark_used(self, otp: Otp, used_at: datetime) -> Otp:
         """Mark an OTP as consumed."""

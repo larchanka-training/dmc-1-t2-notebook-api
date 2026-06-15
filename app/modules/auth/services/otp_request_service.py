@@ -20,6 +20,10 @@ class OtpRequestResult:
     raw_code: str | None
 
 
+class OtpRateLimitError(ValueError):
+    """Raised when OTP request rate limits are exceeded."""
+
+
 class OtpRequestService:
     """Coordinate OTP request business logic."""
 
@@ -46,6 +50,16 @@ class OtpRequestService:
         """Create, persist, and send a fresh OTP for an email."""
         requested_at = self._normalize_datetime(now or datetime.now(UTC))
         normalized_email = self._code_service.normalize_email(email)
+        window_start = requested_at - timedelta(
+            seconds=self._config.otp_rate_limit_window_seconds
+        )
+        recent_requests = self._otp_repository.count_recent_by_email(
+            normalized_email,
+            window_start,
+        )
+        if recent_requests >= self._config.otp_rate_limit_per_email:
+            raise OtpRateLimitError("too_many_otp_requests")
+
         raw_code = self._code_service.generate_otp()
         otp_hash = self._code_service.hash_otp(raw_code)
         expires_at = requested_at + timedelta(seconds=self._config.otp_ttl_seconds)

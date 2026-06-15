@@ -15,6 +15,7 @@ def test_auth_settings_defaults_are_local_safe() -> None:
     assert settings.otp_ttl_seconds == 300
     assert settings.otp_max_attempts == 5
     assert settings.otp_rate_limit_per_email == 3
+    assert settings.otp_rate_limit_window_seconds == 900
     assert settings.is_local_like is True
     assert settings.is_production_like is False
     assert settings.placeholder_auth_enabled is True
