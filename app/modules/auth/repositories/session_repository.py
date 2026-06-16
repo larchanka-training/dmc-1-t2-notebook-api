@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.modules.auth.models.auth_session import AuthSession
@@ -78,3 +78,22 @@ class AuthSessionRepository:
         self.db.add(session)
         self.db.flush()
         return session
+
+    def get_cleanup_candidate_ids(self, cutoff: datetime) -> list[UUID]:
+        """Return sessions safe to remove after auth-history retention."""
+        statement = select(AuthSession.id).where(
+            or_(
+                AuthSession.expires_at < cutoff,
+                AuthSession.revoked_at < cutoff,
+            )
+        )
+        return list(self.db.execute(statement).scalars())
+
+    def delete_by_ids(self, session_ids: list[UUID]) -> int:
+        """Delete sessions by id."""
+        if not session_ids:
+            return 0
+        statement = delete(AuthSession).where(AuthSession.id.in_(session_ids))
+        result = self.db.execute(statement)
+        self.db.flush()
+        return result.rowcount or 0

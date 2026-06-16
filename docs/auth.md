@@ -192,15 +192,18 @@ Auth и user tables находятся в PostgreSQL-схеме `users`.
 | `otp_hash` | `text` NOT NULL | HMAC-SHA256 от OTP с server-side `OTP_HASH_SECRET` либо salted slow hash. Plain OTP не хранится. |
 | `expires_at` | `timestamptz` NOT NULL | now() + 5 минут. |
 | `used_at` | `timestamptz` NULL | NULL = ещё не использован. |
+| `failed_attempts` | `int` NOT NULL DEFAULT 0 | Счётчик неверных verify-попыток для текущего OTP. |
 | `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
 
 **Индексы:**
 - `otps_email_active_idx` on `(email, expires_at DESC) WHERE used_at IS NULL`
   — для последнего активного OTP пользователя.
-- TTL-cleanup через cron: `DELETE FROM otps WHERE expires_at < now() - interval '1 day'`.
+- TTL-cleanup через `scripts/auth_cleanup.py run`: удаляет
+  `otps WHERE expires_at < now() - interval '1 day'`.
 
-`attempts` / per-OTP failed-attempt invalidation — future hardening, не часть
-текущего schema среза.
+Per-OTP failed-attempt invalidation реализована через `failed_attempts`:
+при достижении `OTP_MAX_ATTEMPTS` OTP помечается `used_at` и больше не
+принимается.
 
 ### 4.3. `sessions`
 
@@ -256,7 +259,9 @@ reuse-detection (§2.2, §5.3).
 - `refresh_tokens_family_idx` on `(family_id, created_at DESC)`;
 - `refresh_tokens_active_idx` on `(session_id, expires_at DESC) WHERE revoked_at IS NULL AND rotated_at IS NULL`.
 
-**Cleanup:** cron удаляет записи, у которых `session.expires_at < now() - interval '90 days'` (согласуется с sessions retention в §11).
+**Cleanup:** `scripts/auth_cleanup.py run` удаляет token history вместе с
+сессиями, у которых `sessions.expires_at` или `sessions.revoked_at` старше
+`now() - interval '90 days'` (согласуется с sessions retention в §11).
 
 ### 4.5. `notebooks`
 
@@ -794,8 +799,16 @@ while notebook.format_version < CURRENT_FORMAT_VERSION:
 | `POST /api/v1/auth/refresh` | 60 / мин на sessionId. Reuse старого refresh → отзыв всей family и самой сессии (не всех сессий пользователя, см. §5.3). |
 
 - **CAPTCHA** — не в v1. Добавим если появятся злоупотребления.
-- **Sessions retention** — при logout ставится `revoked_at`. Cron удаляет записи старше **90 дней** после revocation/expiration. Объём аудита ограничен.
-- **OTP cleanup** — cron удаляет `otps WHERE expires_at < now() - interval '1 day'`.
+- **Sessions retention** — при logout ставится `revoked_at`.
+  `scripts/auth_cleanup.py run` удаляет sessions старше **90 дней** после
+  revocation/expiration и предварительно удаляет связанную refresh-token
+  history. Active sessions и недавняя reuse-detection history не удаляются.
+- **OTP cleanup** — `scripts/auth_cleanup.py run` удаляет
+  `otps WHERE expires_at < now() - interval '1 day'`.
+- **Operational model** — cleanup реализован как idempotent backend CLI,
+  который можно запускать вручную, через one-off ECS task или через будущий
+  scheduler. Повторный запуск безопасен: уже удалённые records дают нулевые
+  counters.
 
 ### Изоляция исполнения пользовательского JS (frontend-слой)
 
@@ -824,6 +837,8 @@ VM) отдаёт nginx (`proxy/`), не backend-приложение. Измен
 | `OTP_MAX_ATTEMPTS` | `5` | Неудачных попыток до инвалидации. |
 | `OTP_RATE_LIMIT_PER_EMAIL` | `3` | Запросов / 15 мин. |
 | `OTP_RATE_LIMIT_WINDOW_SECONDS` | `900` | Окно rate limit для `OTP_RATE_LIMIT_PER_EMAIL`. |
+| `AUTH_CLEANUP_OTP_GRACE_SECONDS` | `86400` | Сколько хранить expired OTP records после `expires_at` перед cleanup. |
+| `AUTH_CLEANUP_RETENTION_SECONDS` | `7776000` | Retention для expired/revoked sessions и refresh-token history (90 дней). |
 | `ALLOW_PLACEHOLDER_AUTH` | auto | Optional override. Работает только в local-like env; в production-like env запрещён validation’ом. |
 | `RESEND_API_KEY` | `""` | API-ключ [Resend](https://resend.com) для отправки OTP-писем. Required в production-like env (validation падает, если пусто). Также используется как сигнал для factory: `get_email_service` выбирает `ResendEmailService` только для `is_production_like`, остальные env (включая нераспознанные) получают `NoopEmailService`. |
 | `EMAIL_FROM` | `noreply@example.com` | Email-адрес отправителя для OTP-писем через Resend. В production-like env должен быть переопределён на verified sender domain — дефолт `noreply@example.com` и значения, не похожие на email, отвергаются validation'ом (Resend всё равно отклонит отправку с unverified `example.com`). |
