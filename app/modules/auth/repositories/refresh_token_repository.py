@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.modules.auth.models.refresh_token import RefreshToken
@@ -97,6 +97,17 @@ class RefreshTokenRepository:
         result = self.db.execute(statement)
         self.db.flush()
         return result.rowcount or 0
+
+    def count_by_session_ids(self, session_ids: list[UUID]) -> int:
+        """Count refresh-token rows belonging to the given sessions."""
+        if not session_ids:
+            return 0
+        statement = (
+            select(func.count())
+            .select_from(RefreshToken)
+            .where(RefreshToken.session_id.in_(session_ids))
+        )
+        return int(self.db.execute(statement).scalar_one())
 
     def delete_by_session_ids(self, session_ids: list[UUID]) -> int:
         """Delete refresh-token history for sessions past retention."""
