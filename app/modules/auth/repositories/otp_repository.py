@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.modules.auth.models.otp import Otp
@@ -100,3 +100,10 @@ class OtpRepository:
         self.db.add(otp)
         self.db.flush()
         return otp
+
+    def delete_expired_before(self, cutoff: datetime) -> int:
+        """Delete OTP rows whose expiry is older than the retention cutoff."""
+        statement = delete(Otp).where(Otp.expires_at < cutoff)
+        result = self.db.execute(statement)
+        self.db.flush()
+        return result.rowcount or 0
