@@ -16,5 +16,6 @@
     <include file="0003-move-users-schema.xml" relativeToChangelogFile="true"/>
     <include file="0004-auth-otp-sessions-refresh-tokens.xml" relativeToChangelogFile="true"/>
     <include file="0005-otp-failed-attempts.xml" relativeToChangelogFile="true"/>
+    <include file="0006-auth-cleanup-indexes.xml" relativeToChangelogFile="true"/>
 
 </databaseChangeLog>

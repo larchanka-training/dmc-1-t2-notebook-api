@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <changeSet id="users-0006-auth-cleanup-indexes" author="msd">
+        <comment>
+            TARDIS-38: indexes to support auth cleanup queries.
+            The existing partial indexes filter on used_at IS NULL /
+            revoked_at IS NULL, so they cannot be used by cleanup
+            (which targets expired/revoked rows). Without these
+            indexes, cleanup falls back to a full table scan.
+        </comment>
+
+        <sql>
+            CREATE INDEX IF NOT EXISTS otps_expires_at_idx
+                ON users.otps(expires_at);
+
+            CREATE INDEX IF NOT EXISTS sessions_expires_at_idx
+                ON users.sessions(expires_at);
+
+            CREATE INDEX IF NOT EXISTS sessions_revoked_at_idx
+                ON users.sessions(revoked_at)
+                WHERE revoked_at IS NOT NULL;
+        </sql>
+
+        <rollback>
+            <sql>
+                DROP INDEX IF EXISTS users.sessions_revoked_at_idx;
+                DROP INDEX IF EXISTS users.sessions_expires_at_idx;
+                DROP INDEX IF EXISTS users.otps_expires_at_idx;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

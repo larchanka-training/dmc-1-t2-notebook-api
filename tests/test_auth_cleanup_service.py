@@ -142,3 +142,62 @@ def test_auth_cleanup_is_safe_to_rerun(db_session: Session) -> None:
     assert second.otps_deleted == 0
     assert second.sessions_deleted == 0
     assert second.refresh_tokens_deleted == 0
+
+
+def test_auth_cleanup_preview_returns_counts_without_deleting(
+    db_session: Session,
+) -> None:
+    otp_repo = OtpRepository(db_session)
+    session_repo = AuthSessionRepository(db_session)
+    token_repo = RefreshTokenRepository(db_session)
+    user_id = UUID("00000000-0000-0000-0000-000000000001")
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=UTC)
+
+    old_otp = otp_repo.create(
+        email="user@example.com",
+        otp_hash="old-expired",
+        created_at=now - timedelta(days=3),
+        expires_at=now - timedelta(days=2),
+    )
+    old_session = session_repo.create(
+        user_id=user_id,
+        created_at=now - timedelta(days=100),
+        expires_at=now - timedelta(days=91),
+    )
+    old_token = token_repo.create(
+        session_id=old_session.id,
+        token_hash="refresh-old",
+        family_id=uuid4(),
+        created_at=old_session.created_at,
+        expires_at=old_session.expires_at,
+    )
+
+    preview = _build_service(db_session).preview(now=now)
+
+    # Counts mirror what cleanup would delete.
+    assert preview.otps_deleted == 1
+    assert preview.sessions_deleted == 1
+    assert preview.refresh_tokens_deleted == 1
+    # Nothing actually deleted.
+    assert db_session.get(Otp, old_otp.id) == old_otp
+    assert db_session.get(AuthSession, old_session.id) == old_session
+    assert db_session.get(RefreshToken, old_token.id) == old_token
+
+
+def test_auth_cleanup_preview_zero_when_nothing_stale(
+    db_session: Session,
+) -> None:
+    otp_repo = OtpRepository(db_session)
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=UTC)
+    otp_repo.create(
+        email="user@example.com",
+        otp_hash="fresh",
+        created_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+
+    preview = _build_service(db_session).preview(now=now)
+
+    assert preview.otps_deleted == 0
+    assert preview.sessions_deleted == 0
+    assert preview.refresh_tokens_deleted == 0

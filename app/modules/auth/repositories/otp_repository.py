@@ -101,6 +101,11 @@ class OtpRepository:
         self.db.flush()
         return otp
 
+    def count_expired_before(self, cutoff: datetime) -> int:
+        """Count OTP rows whose expiry is older than the retention cutoff."""
+        statement = select(func.count()).select_from(Otp).where(Otp.expires_at < cutoff)
+        return int(self.db.execute(statement).scalar_one())
+
     def delete_expired_before(self, cutoff: datetime) -> int:
         """Delete OTP rows whose expiry is older than the retention cutoff."""
         statement = delete(Otp).where(Otp.expires_at < cutoff)

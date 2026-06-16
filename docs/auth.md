@@ -808,7 +808,20 @@ while notebook.format_version < CURRENT_FORMAT_VERSION:
 - **Operational model** — cleanup реализован как idempotent backend CLI,
   который можно запускать вручную, через one-off ECS task или через будущий
   scheduler. Повторный запуск безопасен: уже удалённые records дают нулевые
-  counters.
+  counters. Перед первым запуском (и после изменения retention настроек)
+  стоит сделать `python scripts/auth_cleanup.py run --dry-run`, чтобы
+  увидеть план удаления без побочных эффектов.
+- **Indexes** — миграция `0006-auth-cleanup-indexes.xml` добавляет полные
+  индексы по `otps.expires_at` и `sessions.expires_at`, а также partial
+  index по `sessions.revoked_at WHERE revoked_at IS NOT NULL`.
+  Существующие partial-индексы фильтруют `used_at IS NULL` / `revoked_at
+  IS NULL` и не подходят для cleanup-запросов, целящих в expired/revoked
+  строки.
+- **Observability** — каждый run пишет structured-лог `auth.cleanup.completed`
+  (или `auth.cleanup.previewed` для `--dry-run`) с counters и cutoff
+  timestamps. CLI дополнительно печатает JSON-сводку в stdout для
+  machine-readable вывода и логирует начало/ошибку как
+  `auth.cleanup.cli.started` / `auth.cleanup.cli.failed`.
 
 ### Изоляция исполнения пользовательского JS (frontend-слой)
 
