@@ -199,14 +199,47 @@ GUARD_CONTEXT_FIELD = "notebook_context"
 GUARD_CONTEXT_TRUNCATION_MARKER = "…"
 GUARD_CONTEXT_REDACTION_MARKER = "[redacted by safety pre-check]"
 
+# Defense layer 1 of N for context-borne prompt injection in the guard input.
+# This is intentionally a shallow English-only heuristic — it is bypassable by
+# obfuscation, other languages, role-play indirection, etc. The primary
+# guarantees against context-injection live elsewhere:
+#   (a) the guard input is a JSON object whose user-controlled strings go
+#       through `json.dumps` escaping (`_build_guard_prompt`), so context
+#       cannot forge structural section headers;
+#   (b) the guard system prompt explicitly treats `notebook_context` as data
+#       and tells the classifier to ignore instructions inside it;
+#   (c) the generator's output passes esbuild syntax validation, so even a
+#       successful injection must produce valid JS to survive.
+# This regex pre-filter only removes the most obvious phrasing so the
+# classifier doesn't false-positive on benign tasks just because the
+# notebook author wrote "ignore previous instructions" in a markdown cell.
+# Pattern coverage notes:
+#   * the *target* word is intentionally permissive
+#     (instructions|prompts?|rules?|messages?|system\s+prompt) so that
+#     "ignore previous prompts" / "disregard previous rules" are also caught;
+#   * everything is case-insensitive (`re.IGNORECASE`).
+_INJECTION_TARGET = r"(?:instructions?|prompts?|rules?|messages?|system\s+(?:prompt|message))"
+_SECRET_TARGET = r"(?:api\s+keys?|secrets?|process\.env|environment\s+variables?|credentials?)"
+
 _CONTEXT_INJECTION_PATTERNS = [
-    re.compile(r"\bignore\s+(?:previous|prior|all|the\s+above)\s+instructions\b", re.IGNORECASE),
+    re.compile(
+        rf"\bignore\s+(?:previous|prior|all|the\s+above)\s+{_INJECTION_TARGET}\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bdisregard\s+(?:the\s+)?(?:previous|prior|above)\b", re.IGNORECASE),
+    re.compile(
+        rf"\bforget\s+(?:the\s+)?(?:previous|prior|above)\s+{_INJECTION_TARGET}\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\breveal\s+(?:the\s+)?system\s+prompt\b", re.IGNORECASE),
-    re.compile(r"\bdump\s+(?:api\s+keys?|secrets?|process\.env|environment\s+variables)\b", re.IGNORECASE),
-    re.compile(r"\bshow\s+(?:me\s+)?(?:api\s+keys?|secrets?|process\.env|environment\s+variables)\b", re.IGNORECASE),
-    re.compile(r"\bprint\s+(?:api\s+keys?|secrets?|process\.env|environment\s+variables)\b", re.IGNORECASE),
-    re.compile(r"\boverride\s+(?:the\s+)?(?:system|developer)\s+instructions\b", re.IGNORECASE),
+    re.compile(rf"\bdump\s+{_SECRET_TARGET}\b", re.IGNORECASE),
+    re.compile(rf"\bshow\s+(?:me\s+)?{_SECRET_TARGET}\b", re.IGNORECASE),
+    re.compile(rf"\bprint\s+{_SECRET_TARGET}\b", re.IGNORECASE),
+    re.compile(rf"\bleak\s+{_SECRET_TARGET}\b", re.IGNORECASE),
+    re.compile(
+        r"\boverride\s+(?:the\s+)?(?:system|developer)\s+instructions\b",
+        re.IGNORECASE,
+    ),
 ]
 
 
@@ -261,7 +294,25 @@ def _build_guard_prompt(payload: GenerateRequest) -> str:
     return json.dumps(payload_dict, ensure_ascii=False, indent=2)
 
 
+def _contains_context_injection(source: str) -> bool:
+    """Return whether context text contains explicit prompt-injection phrasing.
+
+    Shallow English-only heuristic; see `_CONTEXT_INJECTION_PATTERNS`
+    docstring for the wider defence model this fits into.
+    """
+    return any(pattern.search(source) for pattern in _CONTEXT_INJECTION_PATTERNS)
+
+
 def _truncate_context_for_guard(payload: GenerateRequest) -> list[dict[str, str]]:
+    """Build the guard-only view of notebook context.
+
+    Per cell: collapse whitespace → redact if it matches injection patterns →
+    truncate to `_GUARD_CONTEXT_MAX_CHARS_PER_CELL`. This trimmed/redacted
+    view is consumed ONLY by the guard classifier; the generator still
+    receives the full, unredacted, untruncated context further down the
+    pipeline. The asymmetry is intentional — see the docs/ai-architecture.md
+    §8 "Threat-model shift" note for the rationale.
+    """
     cells = payload.context[:_GUARD_CONTEXT_MAX_CELLS]
     rendered: list[dict[str, str]] = []
     for cell in cells:
@@ -274,11 +325,6 @@ def _truncate_context_for_guard(payload: GenerateRequest) -> list[dict[str, str]
             flat = flat[:_GUARD_CONTEXT_MAX_CHARS_PER_CELL] + GUARD_CONTEXT_TRUNCATION_MARKER
         rendered.append({"kind": cell.kind, "source": flat})
     return rendered
-
-
-def _contains_context_injection(source: str) -> bool:
-    """Return whether context text contains explicit prompt-injection phrasing."""
-    return any(pattern.search(source) for pattern in _CONTEXT_INJECTION_PATTERNS)
 
 
 def _build_generation_prompt(payload: GenerateRequest) -> str:
