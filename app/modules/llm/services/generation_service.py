@@ -1,6 +1,7 @@
 """Cloud LLM generation orchestration: guard, generate, validate, repair."""
 
 import json
+import re
 from time import perf_counter
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -196,6 +197,17 @@ _GUARD_CONTEXT_MAX_CHARS_PER_CELL = 500
 GUARD_TASK_FIELD = "task"
 GUARD_CONTEXT_FIELD = "notebook_context"
 GUARD_CONTEXT_TRUNCATION_MARKER = "…"
+GUARD_CONTEXT_REDACTION_MARKER = "[redacted by safety pre-check]"
+
+_CONTEXT_INJECTION_PATTERNS = [
+    re.compile(r"\bignore\s+(?:previous|prior|all|the\s+above)\s+instructions\b", re.IGNORECASE),
+    re.compile(r"\bdisregard\s+(?:the\s+)?(?:previous|prior|above)\b", re.IGNORECASE),
+    re.compile(r"\breveal\s+(?:the\s+)?system\s+prompt\b", re.IGNORECASE),
+    re.compile(r"\bdump\s+(?:api\s+keys?|secrets?|process\.env|environment\s+variables)\b", re.IGNORECASE),
+    re.compile(r"\bshow\s+(?:me\s+)?(?:api\s+keys?|secrets?|process\.env|environment\s+variables)\b", re.IGNORECASE),
+    re.compile(r"\bprint\s+(?:api\s+keys?|secrets?|process\.env|environment\s+variables)\b", re.IGNORECASE),
+    re.compile(r"\boverride\s+(?:the\s+)?(?:system|developer)\s+instructions\b", re.IGNORECASE),
+]
 
 
 def _guard_system_prompt() -> str:
@@ -256,10 +268,17 @@ def _truncate_context_for_guard(payload: GenerateRequest) -> list[dict[str, str]
         # Collapse whitespace so markdown line-breaks don't add noise to the
         # classifier; cap each cell's payload.
         flat = " ".join(cell.source.split())
+        if _contains_context_injection(flat):
+            flat = GUARD_CONTEXT_REDACTION_MARKER
         if len(flat) > _GUARD_CONTEXT_MAX_CHARS_PER_CELL:
             flat = flat[:_GUARD_CONTEXT_MAX_CHARS_PER_CELL] + GUARD_CONTEXT_TRUNCATION_MARKER
         rendered.append({"kind": cell.kind, "source": flat})
     return rendered
+
+
+def _contains_context_injection(source: str) -> bool:
+    """Return whether context text contains explicit prompt-injection phrasing."""
+    return any(pattern.search(source) for pattern in _CONTEXT_INJECTION_PATTERNS)
 
 
 def _build_generation_prompt(payload: GenerateRequest) -> str:
