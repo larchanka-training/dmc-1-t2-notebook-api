@@ -26,12 +26,14 @@ def _login(client: TestClient, email: str = "llm-user@example.com") -> dict[str,
 @dataclass
 class FakeGenerationService:
     content: str = "const value = 1;"
+    result_kind: str = "code"
     reject: bool = False
 
     def generate(self, payload, user):  # type: ignore[no-untyped-def]
         if self.reject:
             raise PromptRejectedError("Prompt was rejected by the safety guard")
         return GenerateResponse(
+            result_kind=self.result_kind,
             content=self.content,
             model="fake-model",
             request_id=uuid4(),
@@ -74,6 +76,31 @@ def test_llm_generate_returns_validated_code(client: TestClient) -> None:
     assert payload["tier"] == "backend"
     assert payload["model"] == "fake-model"
     assert payload["requestId"]
+
+
+def test_llm_generate_returns_text_result_kind(client: TestClient) -> None:
+    headers = _login(client)
+    app.dependency_overrides[get_llm_generation_service] = lambda: FakeGenerationService(
+        content="Use `map` when you need a same-length transformed array.",
+        result_kind="text",
+    )
+    app.dependency_overrides[get_rate_limiter] = lambda: InMemoryRateLimiter(20, 60)
+
+    try:
+        response = client.post(
+            f"{settings.api_prefix}/llm/generate",
+            json={"prompt": "explain Array.prototype.map"},
+            headers=headers,
+        )
+    finally:
+        app.dependency_overrides.pop(get_llm_generation_service, None)
+        app.dependency_overrides.pop(get_rate_limiter, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["resultKind"] == "text"
+    assert payload["content"] == "Use `map` when you need a same-length transformed array."
+    assert payload["tier"] == "backend"
 
 
 def test_llm_generate_rejects_overlong_prompt(client: TestClient) -> None:

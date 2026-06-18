@@ -12,6 +12,7 @@ from app.modules.auth.schemas.user_schemas import CurrentUser
 from app.modules.llm.schemas.llm_schemas import (
     GenerateRequest,
     GenerateResponse,
+    ResultKind,
     TokenUsage,
 )
 from app.modules.llm.services.bedrock_client import (
@@ -76,9 +77,14 @@ class LlmGenerationService:
         request_id = uuid4()
         start = perf_counter()
 
+        result_kind = _infer_result_kind(payload)
         self._guard_prompt(payload, user, request_id)
-        provider_response = self._generate_model_response(payload)
-        content, final_response = self._validate_or_repair(payload, provider_response)
+        provider_response = self._generate_model_response(payload, result_kind)
+        if result_kind == "code":
+            content, final_response = self._validate_or_repair(payload, provider_response)
+        else:
+            content = _extract_text(provider_response.text)
+            final_response = provider_response
 
         latency_ms = int((perf_counter() - start) * 1000)
         logger.info(
@@ -91,6 +97,7 @@ class LlmGenerationService:
             prompt_tokens=final_response.prompt_tokens,
             completion_tokens=final_response.completion_tokens,
             prompt_length=len(payload.prompt),
+            result_kind=result_kind,
             # Split the counter so post-mortems can tell apart what the user
             # *sent* and what the guard *evaluated*: see _truncate_context_for_guard.
             request_context_cells=len(payload.context),
@@ -98,6 +105,7 @@ class LlmGenerationService:
         )
 
         return GenerateResponse(
+            result_kind=result_kind,
             content=content,
             model=final_response.model,
             tokens=TokenUsage(
@@ -138,10 +146,12 @@ class LlmGenerationService:
             )
             raise PromptRejectedError("Prompt was rejected by the safety guard")
 
-    def _generate_model_response(self, payload: GenerateRequest) -> LlmProviderResponse:
+    def _generate_model_response(
+        self, payload: GenerateRequest, result_kind: ResultKind
+    ) -> LlmProviderResponse:
         return self.provider.converse(
             model_id=self.generator_model_id,
-            system_prompt=_generation_system_prompt(payload.language),
+            system_prompt=_generation_system_prompt(payload.language, result_kind),
             user_prompt=_build_generation_prompt(payload),
             max_tokens=self.max_tokens,
             temperature=self.temperature,
@@ -174,7 +184,7 @@ class LlmGenerationService:
 
             current_response = self.provider.converse(
                 model_id=self.generator_model_id,
-                system_prompt=_generation_system_prompt(payload.language),
+                system_prompt=_generation_system_prompt(payload.language, "code"),
                 user_prompt=_build_repair_prompt(payload, code, validation.error or ""),
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
@@ -242,6 +252,16 @@ _CONTEXT_INJECTION_PATTERNS = [
     ),
 ]
 
+_TEXT_RESULT_PATTERNS = [
+    re.compile(r"\bexplain(?:\s+why|\s+how|\s+what)?\b", re.IGNORECASE),
+    re.compile(r"\bdescribe\b", re.IGNORECASE),
+    re.compile(r"\bsummar(?:y|ize|ise)\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+(?:is|are|does|do)\b", re.IGNORECASE),
+    re.compile(r"\bwhy\s+(?:does|do|is|are)\b", re.IGNORECASE),
+    re.compile(r"\bin\s+(?:markdown|plain\s+text|prose)\b", re.IGNORECASE),
+    re.compile(r"\banswer\s+(?:in|with)\s+(?:text|markdown|prose)\b", re.IGNORECASE),
+]
+
 
 def _guard_system_prompt() -> str:
     return (
@@ -267,7 +287,37 @@ def _guard_system_prompt() -> str:
     )
 
 
-def _generation_system_prompt(language: str) -> str:
+def _infer_result_kind(payload: GenerateRequest) -> ResultKind:
+    """Infer whether the user asked for code or a prose answer.
+
+    This is deliberately conservative: code remains the default, edit mode is
+    always code, and only explicit explanation/prose prompts become text cells.
+    """
+    if payload.mode == "edit":
+        return "code"
+
+    prompt = payload.prompt.strip()
+    if any(pattern.search(prompt) for pattern in _TEXT_RESULT_PATTERNS):
+        return "text"
+    return "code"
+
+
+def _extract_text(raw: str) -> str:
+    text = raw.strip()
+    if not text:
+        raise CodeValidationError("Generated text was empty")
+    return text
+
+
+def _generation_system_prompt(language: str, result_kind: ResultKind) -> str:
+    if result_kind == "text":
+        return (
+            "You write concise Markdown for a notebook text cell. "
+            "Answer the user's task directly. Do not include executable code "
+            "unless the user explicitly asks for a small illustrative snippet. "
+            "Do not include markdown fences around the whole answer, Node.js "
+            "APIs, filesystem access, network access, or secret handling."
+        )
     return (
         f"You write clean {language} code for a browser QuickJS sandbox. "
         "Return ONLY executable code. Do not include markdown fences, prose, "

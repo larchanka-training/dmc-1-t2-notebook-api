@@ -22,6 +22,7 @@ MAX_CONTEXT_ITEMS = 10
 # pre-formatted compact string in ``source`` and share the same byte budget, so
 # the size validator below applies to them unchanged.
 ContextCellKind = Literal["code", "markdown", "text", "output", "globals", "summary"]
+ResultKind = Literal["code", "text"]
 
 
 class LlmContextCell(BaseModel):
@@ -75,7 +76,7 @@ class GenerateResponse(BaseModel):
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
-    result_kind: Literal["code"] = "code"
+    result_kind: ResultKind = "code"
     content: str
     model: str
     tier: Literal["backend"] = "backend"

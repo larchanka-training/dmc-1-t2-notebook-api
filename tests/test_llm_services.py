@@ -111,6 +111,7 @@ def test_generate_returns_clean_validated_code() -> None:
         _user(),
     )
 
+    assert response.result_kind == "code"
     assert response.content == "const value = 1;"
     assert response.model == "generator-model"
     assert response.tokens.prompt == 10
@@ -118,6 +119,59 @@ def test_generate_returns_clean_validated_code() -> None:
         "guard-model",
         "generator-model",
     ]
+
+
+def test_generate_returns_text_without_syntax_validation() -> None:
+    provider = FakeProvider(
+        [
+            LlmProviderResponse(text='{"safe": true}', model="guard-model"),
+            LlmProviderResponse(
+                text="`Array.prototype.reduce` folds an array into one value.",
+                model="generator-model",
+                prompt_tokens=12,
+                completion_tokens=7,
+            ),
+        ]
+    )
+    validator = FakeValidator([])
+
+    response = _service(provider, validator).generate(
+        GenerateRequest(prompt="Explain what Array.prototype.reduce does"),
+        _user(),
+    )
+
+    assert response.result_kind == "text"
+    assert response.content == "`Array.prototype.reduce` folds an array into one value."
+    assert response.model == "generator-model"
+    assert response.tokens.prompt == 12
+    assert [call["model_id"] for call in provider.calls] == [
+        "guard-model",
+        "generator-model",
+    ]
+    assert "notebook text cell" in str(provider.calls[1]["system_prompt"])
+
+
+def test_edit_mode_always_returns_code_even_for_explanatory_prompt() -> None:
+    provider = FakeProvider(
+        [
+            LlmProviderResponse(text='{"safe": true}', model="guard-model"),
+            LlmProviderResponse(text="const value = 2;", model="generator-model"),
+        ]
+    )
+    validator = FakeValidator([SyntaxValidationResult(ok=True)])
+
+    response = _service(provider, validator).generate(
+        GenerateRequest(
+            mode="edit",
+            prompt="Explain this and improve it",
+            base_code="const value = 1;",
+        ),
+        _user(),
+    )
+
+    assert response.result_kind == "code"
+    assert response.content == "const value = 2;"
+    assert "Return ONLY executable code" in str(provider.calls[1]["system_prompt"])
 
 
 def test_guard_checks_assembled_prompt_with_context() -> None:
