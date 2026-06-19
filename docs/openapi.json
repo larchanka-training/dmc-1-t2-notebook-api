@@ -587,8 +587,11 @@
             "type": "string"
           },
           "resultKind": {
-            "const": "code",
             "default": "code",
+            "enum": [
+              "code",
+              "text"
+            ],
             "title": "Resultkind",
             "type": "string"
           },
