@@ -20,7 +20,11 @@ from app.modules.llm.services.bedrock_client import (
     LlmProviderResponse,
     parse_guard_json,
 )
-from app.modules.llm.services.errors import CodeValidationError, PromptRejectedError
+from app.modules.llm.services.errors import (
+    CodeValidationError,
+    PromptRejectedError,
+    TextGenerationError,
+)
 from app.modules.llm.services.output_extractor import extract_code
 from app.modules.llm.services.syntax_validator import EsbuildSyntaxValidator
 from app.modules.llm.services.syntax_validator import SyntaxValidationResult
@@ -152,7 +156,14 @@ class LlmGenerationService:
         return self.provider.converse(
             model_id=self.generator_model_id,
             system_prompt=_generation_system_prompt(payload.language, result_kind),
-            user_prompt=_build_generation_prompt(payload),
+            user_prompt=_build_generation_prompt(
+                payload,
+                context_override=(
+                    _truncate_context_for_guard(payload)
+                    if result_kind == "text"
+                    else None
+                ),
+            ),
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
@@ -262,6 +273,19 @@ _TEXT_RESULT_PATTERNS = [
     re.compile(r"\banswer\s+(?:in|with)\s+(?:text|markdown|prose)\b", re.IGNORECASE),
 ]
 
+_CODE_RESULT_PATTERNS = [
+    re.compile(
+        r"\b(?:write|generate|create|implement|build|fix|refactor|make|add)\b"
+        r".{0,80}\b(?:function|class|code|javascript|typescript|component|hook|api|endpoint|script)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:function|class|code|javascript|typescript|component|hook|api|endpoint|script)\b"
+        r".{0,80}\b(?:write|generate|create|implement|build|fix|refactor|make|add)\b",
+        re.IGNORECASE,
+    ),
+]
+
 
 def _guard_system_prompt() -> str:
     return (
@@ -297,6 +321,8 @@ def _infer_result_kind(payload: GenerateRequest) -> ResultKind:
         return "code"
 
     prompt = payload.prompt.strip()
+    if any(pattern.search(prompt) for pattern in _CODE_RESULT_PATTERNS):
+        return "code"
     if any(pattern.search(prompt) for pattern in _TEXT_RESULT_PATTERNS):
         return "text"
     return "code"
@@ -305,7 +331,7 @@ def _infer_result_kind(payload: GenerateRequest) -> ResultKind:
 def _extract_text(raw: str) -> str:
     text = raw.strip()
     if not text:
-        raise CodeValidationError("Generated text was empty")
+        raise TextGenerationError("Generated text was empty")
     return text
 
 
@@ -377,13 +403,22 @@ def _truncate_context_for_guard(payload: GenerateRequest) -> list[dict[str, str]
     return rendered
 
 
-def _build_generation_prompt(payload: GenerateRequest) -> str:
+def _build_generation_prompt(
+    payload: GenerateRequest,
+    *,
+    context_override: list[dict[str, str]] | None = None,
+) -> str:
     parts: list[str] = []
     if payload.notebook_title:
         parts.append(f"Notebook title: {payload.notebook_title}")
-    if payload.context:
+    context_cells = context_override
+    if context_cells is None:
+        context_cells = [
+            {"kind": cell.kind, "source": cell.source} for cell in payload.context
+        ]
+    if context_cells:
         context = "\n\n".join(
-            f"[{cell.kind}]\n{cell.source}" for cell in payload.context
+            f"[{cell['kind']}]\n{cell['source']}" for cell in context_cells
         )
         parts.append(f"Notebook context:\n{context}")
     if payload.mode == "edit" and payload.base_code:

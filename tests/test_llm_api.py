@@ -7,7 +7,7 @@ from app.core.config import settings
 from app.main import app
 from app.modules.llm.dependencies import get_llm_generation_service, get_rate_limiter
 from app.modules.llm.schemas.llm_schemas import GenerateResponse
-from app.modules.llm.services.errors import PromptRejectedError
+from app.modules.llm.services.errors import PromptRejectedError, TextGenerationError
 from app.modules.llm.services.rate_limiter import InMemoryRateLimiter
 
 
@@ -28,10 +28,13 @@ class FakeGenerationService:
     content: str = "const value = 1;"
     result_kind: str = "code"
     reject: bool = False
+    text_error: bool = False
 
     def generate(self, payload, user):  # type: ignore[no-untyped-def]
         if self.reject:
             raise PromptRejectedError("Prompt was rejected by the safety guard")
+        if self.text_error:
+            raise TextGenerationError("Generated text was empty")
         return GenerateResponse(
             result_kind=self.result_kind,
             content=self.content,
@@ -101,6 +104,27 @@ def test_llm_generate_returns_text_result_kind(client: TestClient) -> None:
     assert payload["resultKind"] == "text"
     assert payload["content"] == "Use `map` when you need a same-length transformed array."
     assert payload["tier"] == "backend"
+
+
+def test_llm_generate_maps_text_generation_failure(client: TestClient) -> None:
+    headers = _login(client)
+    app.dependency_overrides[get_llm_generation_service] = lambda: FakeGenerationService(
+        text_error=True
+    )
+    app.dependency_overrides[get_rate_limiter] = lambda: InMemoryRateLimiter(20, 60)
+
+    try:
+        response = client.post(
+            f"{settings.api_prefix}/llm/generate",
+            json={"prompt": "explain closures"},
+            headers=headers,
+        )
+    finally:
+        app.dependency_overrides.pop(get_llm_generation_service, None)
+        app.dependency_overrides.pop(get_rate_limiter, None)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "text_generation_failed"
 
 
 def test_llm_generate_rejects_overlong_prompt(client: TestClient) -> None:

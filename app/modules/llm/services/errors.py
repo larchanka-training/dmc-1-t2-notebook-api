@@ -50,6 +50,13 @@ class CodeValidationError(LlmServiceError):
     status_code = 422
 
 
+class TextGenerationError(LlmServiceError):
+    """Raised when generated text cannot be returned safely."""
+
+    code = "text_generation_failed"
+    status_code = 422
+
+
 class LlmTimeoutError(LlmServiceError):
     """Raised when the whole generation pipeline exceeds its deadline.
 
