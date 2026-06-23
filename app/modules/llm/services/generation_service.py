@@ -81,6 +81,12 @@ class LlmGenerationService:
         request_id = uuid4()
         start = perf_counter()
 
+        logger.info(
+            "ai_request",
+            request_id=str(request_id),
+            user_id=str(user.id),
+            prompt_length=len(payload.prompt),
+        )
         result_kind = _infer_result_kind(payload)
         self._guard_prompt(payload, user, request_id)
         provider_response = self._generate_model_response(payload, result_kind)
@@ -208,6 +214,7 @@ class LlmGenerationService:
 
 _GUARD_CONTEXT_MAX_CELLS = 3
 _GUARD_CONTEXT_MAX_CHARS_PER_CELL = 500
+
 
 # JSON field names the guard prompt is serialized with. The user-controlled
 # ``payload.prompt`` lands as the *value* of ``GUARD_TASK_FIELD`` after

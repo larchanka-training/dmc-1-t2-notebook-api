@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
 
+from app.core.logging import get_logger
 from app.core.time import datetime_to_unix_ms, unix_ms_to_datetime
 from app.modules.auth.schemas.user_schemas import CurrentUser
 from app.modules.notebooks.demo import demo_id
@@ -38,6 +39,8 @@ from app.modules.notebooks.schemas.notebook_schemas import (
     NotebookResponse,
 )
 from app.modules.notebooks.services.notebook_merge import merge_cells
+
+logger = get_logger(__name__)
 
 #: Допуск «вперёд» для клиентского ``updatedAt`` при вычислении
 #: top-level ``notebook.updated_at`` — защита от часов клиента,
@@ -176,7 +179,13 @@ class NotebookService:
             updated_at=updated_at,
             deleted_at=None,
         )
-        return self.to_response(self.repository.save(notebook)), True
+        response = self.to_response(self.repository.save(notebook))
+        logger.info(
+            "notebook_created",
+            user_id=str(current_user.id),
+            notebook_id=str(notebook_id),
+        )
+        return response, True
 
     def list(
         self,
