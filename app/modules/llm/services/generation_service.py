@@ -108,6 +108,8 @@ class LlmGenerationService:
             completion_tokens=final_response.completion_tokens,
             prompt_length=len(payload.prompt),
             result_kind=result_kind,
+            # Split the counter so post-mortems can tell apart what the user
+            # *sent* and what the guard *evaluated*: see _truncate_context_for_guard.
             request_context_cells=len(payload.context),
             guard_context_cells=min(len(payload.context), _GUARD_CONTEXT_MAX_CELLS),
         )
@@ -143,6 +145,11 @@ class LlmGenerationService:
                 user_id=str(user.id),
                 model=guard_response.model,
                 prompt_length=len(payload.prompt),
+                # ``request_context_cells`` = what the user sent;
+                # ``guard_context_cells`` = what the classifier actually saw
+                # after _truncate_context_for_guard. When a rejection is
+                # investigated, the second number is the one that drove the
+                # decision — see _GUARD_CONTEXT_MAX_CELLS.
                 request_context_cells=len(payload.context),
                 guard_context_cells=min(len(payload.context), _GUARD_CONTEXT_MAX_CELLS),
                 has_base_code=bool(payload.base_code),
@@ -200,17 +207,45 @@ class LlmGenerationService:
                 temperature=self.temperature,
             )
 
+        # Loop exits only via ``return`` on success or ``raise`` on the
+        # final attempt. No fall-through ``raise`` is needed below.
         raise AssertionError("unreachable: _validate_or_repair loop did not terminate")
 
 
 _GUARD_CONTEXT_MAX_CELLS = 3
 _GUARD_CONTEXT_MAX_CHARS_PER_CELL = 500
 
+
+# JSON field names the guard prompt is serialized with. The user-controlled
+# ``payload.prompt`` lands as the *value* of ``GUARD_TASK_FIELD`` after
+# ``json.dumps`` escaping, so a malicious Task can no longer forge a fake
+# "Notebook context" delimiter the way a free-form text prompt could.
+# Kept module-level so the production builder and the tests assert against
+# the same field names.
 GUARD_TASK_FIELD = "task"
 GUARD_CONTEXT_FIELD = "notebook_context"
 GUARD_CONTEXT_TRUNCATION_MARKER = "…"
 GUARD_CONTEXT_REDACTION_MARKER = "[redacted by safety pre-check]"
 
+# Defense layer 1 of N for context-borne prompt injection in the guard input.
+# This is intentionally a shallow English-only heuristic — it is bypassable by
+# obfuscation, other languages, role-play indirection, etc. The primary
+# guarantees against context-injection live elsewhere:
+#   (a) the guard input is a JSON object whose user-controlled strings go
+#       through `json.dumps` escaping (`_build_guard_prompt`), so context
+#       cannot forge structural section headers;
+#   (b) the guard system prompt explicitly treats `notebook_context` as data
+#       and tells the classifier to ignore instructions inside it;
+#   (c) the generator's output passes esbuild syntax validation, so even a
+#       successful injection must produce valid JS to survive.
+# This regex pre-filter only removes the most obvious phrasing so the
+# classifier doesn't false-positive on benign tasks just because the
+# notebook author wrote "ignore previous instructions" in a markdown cell.
+# Pattern coverage notes:
+#   * the *target* word is intentionally permissive
+#     (instructions|prompts?|rules?|messages?|system\s+prompt) so that
+#     "ignore previous prompts" / "disregard previous rules" are also caught;
+#   * everything is case-insensitive (`re.IGNORECASE`).
 _INJECTION_TARGET = r"(?:instructions?|prompts?|rules?|messages?|system\s+(?:prompt|message))"
 _SECRET_TARGET = r"(?:api\s+keys?|secrets?|process\.env|environment\s+variables?|credentials?)"
 
@@ -284,7 +319,11 @@ def _guard_system_prompt() -> str:
 
 
 def _infer_result_kind(payload: GenerateRequest) -> ResultKind:
-    """Infer whether the user asked for code or a prose answer."""
+    """Infer whether the user asked for code or a prose answer.
+
+    This is deliberately conservative: code remains the default, edit mode is
+    always code, and only explicit explanation/prose prompts become text cells.
+    """
     if payload.mode == "edit":
         return "code"
 
@@ -321,6 +360,16 @@ def _generation_system_prompt(language: str, result_kind: ResultKind) -> str:
 
 
 def _build_guard_prompt(payload: GenerateRequest) -> str:
+    """Serialize the guard input as JSON so user text is always a value.
+
+    Free-form text concatenation let a malicious ``payload.prompt`` forge
+    a fake "Notebook context" header inside its own value, smuggling an
+    unsafe instruction into a region the system prompt told the classifier
+    to ignore. Wrapping the input in JSON pushes the user-controlled string
+    through ``json.dumps`` escaping: the prompt is a JSON string literal,
+    section labels live in immutable field names, and no amount of
+    user-supplied newlines or look-alike markers can create a new section.
+    """
     payload_dict = {
         GUARD_TASK_FIELD: payload.prompt,
         GUARD_CONTEXT_FIELD: _truncate_context_for_guard(payload),
@@ -329,13 +378,29 @@ def _build_guard_prompt(payload: GenerateRequest) -> str:
 
 
 def _contains_context_injection(source: str) -> bool:
+    """Return whether context text contains explicit prompt-injection phrasing.
+
+    Shallow English-only heuristic; see `_CONTEXT_INJECTION_PATTERNS`
+    docstring for the wider defence model this fits into.
+    """
     return any(pattern.search(source) for pattern in _CONTEXT_INJECTION_PATTERNS)
 
 
 def _truncate_context_for_guard(payload: GenerateRequest) -> list[dict[str, str]]:
+    """Build the guard-only view of notebook context.
+
+    Per cell: collapse whitespace → redact if it matches injection patterns →
+    truncate to `_GUARD_CONTEXT_MAX_CHARS_PER_CELL`. This trimmed/redacted
+    view is consumed ONLY by the guard classifier; the generator still
+    receives the full, unredacted, untruncated context further down the
+    pipeline. The asymmetry is intentional — see the docs/ai-architecture.md
+    §8 "Threat-model shift" note for the rationale.
+    """
     cells = payload.context[:_GUARD_CONTEXT_MAX_CELLS]
     rendered: list[dict[str, str]] = []
     for cell in cells:
+        # Collapse whitespace so markdown line-breaks don't add noise to the
+        # classifier; cap each cell's payload.
         flat = " ".join(cell.source.split())
         if _contains_context_injection(flat):
             flat = GUARD_CONTEXT_REDACTION_MARKER
