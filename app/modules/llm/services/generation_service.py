@@ -74,6 +74,12 @@ class LlmGenerationService:
         request_id = uuid4()
         start = perf_counter()
 
+        logger.info(
+            "ai_request",
+            request_id=str(request_id),
+            user_id=str(user.id),
+            prompt_length=len(payload.prompt),
+        )
         self._guard_prompt(payload, user, request_id)
         provider_response = self._generate_model_response(payload)
         content, final_response = self._validate_or_repair(payload, provider_response)

@@ -77,6 +77,9 @@ class ExecutionService:
         duration_ms = int((perf_counter() - start) * 1000)
 
         status, outputs = self._map_outcome(result)
+        logger.info("cell_executed", user_id=str(user.id), status=status)
+        if status == "error":
+            logger.info("execution_error", user_id=str(user.id))
         logger.info(
             "execution.completed",
             user_id=str(user.id),
