@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
+from app.modules.notebooks.demo import demo_id
 from app.modules.notebooks.services.notebook_service import MAX_FUTURE_SKEW_MS
 
 
@@ -527,3 +528,174 @@ def test_list_after_logout_returns_401(client: TestClient) -> None:
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "invalid_token"
+
+
+# ---------------------------------------------------------------------------
+# Feature-demo restore (TARDIS-61)
+# ---------------------------------------------------------------------------
+
+_RESTORE_PATH = "/notebooks/features-demo/restore"
+
+
+def test_restore_features_demo_resurrects_soft_deleted(client: TestClient) -> None:
+    headers, user_id, _ = _login(client)
+    nb_id = str(demo_id(UUID(user_id)))
+    created = client.post(
+        f"{settings.api_prefix}/notebooks",
+        json=_payload(nb_id),
+        headers=headers,
+    )
+    assert created.status_code == 201
+    created_body = created.json()
+    deleted = client.delete(
+        f"{settings.api_prefix}/notebooks/{nb_id}",
+        headers=headers,
+    )
+    assert deleted.status_code == 204
+
+    restored = client.post(
+        f"{settings.api_prefix}{_RESTORE_PATH}",
+        headers=headers,
+    )
+
+    assert restored.status_code == 200
+    body = restored.json()
+    assert body["id"] == nb_id
+    # All cells preserved verbatim, not just cells[0].content.
+    assert body["cells"] == created_body["cells"]
+    # Exact resurrection: top-level updatedAt is not bumped on restore.
+    assert body["updatedAt"] == created_body["updatedAt"]
+
+    # Visible again afterwards.
+    fetched = client.get(
+        f"{settings.api_prefix}/notebooks/{nb_id}",
+        headers=headers,
+    )
+    assert fetched.status_code == 200
+
+
+def test_restore_features_demo_is_idempotent_when_active(client: TestClient) -> None:
+    headers, user_id, _ = _login(client)
+    nb_id = str(demo_id(UUID(user_id)))
+    created = client.post(
+        f"{settings.api_prefix}/notebooks",
+        json=_payload(nb_id),
+        headers=headers,
+    )
+    assert created.status_code == 201
+
+    first = client.post(f"{settings.api_prefix}{_RESTORE_PATH}", headers=headers)
+    second = client.post(f"{settings.api_prefix}{_RESTORE_PATH}", headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["id"] == nb_id
+    listed = client.get(f"{settings.api_prefix}/notebooks", headers=headers)
+    assert listed.json()["total"] == 1
+
+
+def test_restore_features_demo_404_when_never_created(client: TestClient) -> None:
+    headers, _, _ = _login(client, "no-demo@example.com")
+
+    response = client.post(f"{settings.api_prefix}{_RESTORE_PATH}", headers=headers)
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NOTEBOOK_NOT_FOUND"
+
+
+def test_restore_features_demo_is_owner_isolated(client: TestClient) -> None:
+    alice_headers, alice_id, _ = _login(client, "alice@example.com")
+    bob_headers, _, _ = _login(client, "bob@example.com")
+    alice_demo = str(demo_id(UUID(alice_id)))
+    created = client.post(
+        f"{settings.api_prefix}/notebooks",
+        json=_payload(alice_demo),
+        headers=alice_headers,
+    )
+    assert created.status_code == 201
+    deleted = client.delete(
+        f"{settings.api_prefix}/notebooks/{alice_demo}",
+        headers=alice_headers,
+    )
+    assert deleted.status_code == 204
+
+    # Bob's restore only ever targets his own (absent) demo → 404.
+    bob_restore = client.post(
+        f"{settings.api_prefix}{_RESTORE_PATH}",
+        headers=bob_headers,
+    )
+    assert bob_restore.status_code == 404
+
+    # Alice can still restore hers.
+    alice_restore = client.post(
+        f"{settings.api_prefix}{_RESTORE_PATH}",
+        headers=alice_headers,
+    )
+    assert alice_restore.status_code == 200
+    assert alice_restore.json()["id"] == alice_demo
+
+
+def test_restore_features_demo_requires_bearer(client: TestClient) -> None:
+    response = client.post(f"{settings.api_prefix}{_RESTORE_PATH}")
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_token"
+
+
+def test_restore_features_demo_rejects_foreign_owned_demo_id(
+    client: TestClient,
+) -> None:
+    """Owner guard at the HTTP boundary: a notebook another user parked at
+    the victim's ``demo_id`` must not be restorable by the victim."""
+    attacker_headers, _, _ = _login(client, "attacker@example.com")
+    victim_headers, victim_id, _ = _login(client, "victim@example.com")
+    victim_demo = str(demo_id(UUID(victim_id)))
+
+    squat = client.post(
+        f"{settings.api_prefix}/notebooks",
+        json=_payload(victim_demo),
+        headers=attacker_headers,
+    )
+    assert squat.status_code == 201
+
+    response = client.post(
+        f"{settings.api_prefix}{_RESTORE_PATH}",
+        headers=victim_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NOTEBOOK_NOT_FOUND"
+
+
+def test_restore_features_demo_ignores_request_body_id(client: TestClient) -> None:
+    """The endpoint takes no id; a JSON body must not turn it into an
+    arbitrary-notebook restore."""
+    headers, _, _ = _login(client, "body-binding@example.com")
+    regular_id = str(uuid4())
+    created = client.post(
+        f"{settings.api_prefix}/notebooks",
+        json=_payload(regular_id),
+        headers=headers,
+    )
+    assert created.status_code == 201
+    deleted = client.delete(
+        f"{settings.api_prefix}/notebooks/{regular_id}",
+        headers=headers,
+    )
+    assert deleted.status_code == 204
+
+    response = client.post(
+        f"{settings.api_prefix}{_RESTORE_PATH}",
+        json={"id": regular_id},
+        headers=headers,
+    )
+
+    # Body ignored → only the (absent) canonical demo is targeted → 404.
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NOTEBOOK_NOT_FOUND"
+    # And the smuggled notebook stays soft-deleted.
+    still_gone = client.get(
+        f"{settings.api_prefix}/notebooks/{regular_id}",
+        headers=headers,
+    )
+    assert still_gone.status_code == 404

@@ -21,5 +21,6 @@
     <include file="changes/0002-users-notebooks.xml" relativeToChangelogFile="true"/>
     <include file="changes/users/changelog-users.xml" relativeToChangelogFile="true"/>
     <include file="changes/notebooks/changelog-notebooks.xml" relativeToChangelogFile="true"/>
+    <include file="changes/ai_context/changelog-ai-context.xml" relativeToChangelogFile="true"/>
 
 </databaseChangeLog>

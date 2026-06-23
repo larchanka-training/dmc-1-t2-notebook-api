@@ -192,15 +192,18 @@ Auth и user tables находятся в PostgreSQL-схеме `users`.
 | `otp_hash` | `text` NOT NULL | HMAC-SHA256 от OTP с server-side `OTP_HASH_SECRET` либо salted slow hash. Plain OTP не хранится. |
 | `expires_at` | `timestamptz` NOT NULL | now() + 5 минут. |
 | `used_at` | `timestamptz` NULL | NULL = ещё не использован. |
+| `failed_attempts` | `int` NOT NULL DEFAULT 0 | Счётчик неверных verify-попыток для текущего OTP. |
 | `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
 
 **Индексы:**
 - `otps_email_active_idx` on `(email, expires_at DESC) WHERE used_at IS NULL`
   — для последнего активного OTP пользователя.
-- TTL-cleanup через cron: `DELETE FROM otps WHERE expires_at < now() - interval '1 day'`.
+- TTL-cleanup через `scripts/auth_cleanup.py run`: удаляет
+  `otps WHERE expires_at < now() - interval '1 day'`.
 
-`attempts` / per-OTP failed-attempt invalidation — future hardening, не часть
-текущего schema среза.
+Per-OTP failed-attempt invalidation реализована через `failed_attempts`:
+при достижении `OTP_MAX_ATTEMPTS` OTP помечается `used_at` и больше не
+принимается.
 
 ### 4.3. `sessions`
 
@@ -256,7 +259,9 @@ reuse-detection (§2.2, §5.3).
 - `refresh_tokens_family_idx` on `(family_id, created_at DESC)`;
 - `refresh_tokens_active_idx` on `(session_id, expires_at DESC) WHERE revoked_at IS NULL AND rotated_at IS NULL`.
 
-**Cleanup:** cron удаляет записи, у которых `session.expires_at < now() - interval '90 days'` (согласуется с sessions retention в §11).
+**Cleanup:** `scripts/auth_cleanup.py run` удаляет token history вместе с
+сессиями, у которых `sessions.expires_at` или `sessions.revoked_at` старше
+`now() - interval '90 days'` (согласуется с sessions retention в §11).
 
 ### 4.5. `notebooks`
 
@@ -313,15 +318,20 @@ timestamps в FE/BE JSON-контрактах.
 - `400 invalid_email` — невалидный формат.
 - `422 VALIDATION_ERROR` — body/schema validation error, в стандартном
   `ApiErrorResponse` envelope.
+- `503 email_delivery_failed` — production-like env, `ResendEmailService`
+  не смог отправить письмо (provider error, timeout, неверный API key/sender).
+  OTP-запись в этом случае не коммитится (rollback в `get_db`), поэтому повтор
+  запроса безопасен.
 
-`429 too_many_otp_requests` — целевое поведение после отдельной задачи по rate
-limiting (§11); текущий TARDIS-75 срез его ещё не реализует.
+`429 too_many_otp_requests` — превышен лимит выдачи OTP для email в текущем
+окне rate limit (§11).
 
 **Side effects:**
 - Все предыдущие неиспользованные OTP этого email помечаются `used_at = now()` (инвалидация).
 - Создаётся новая запись в `otps` с `expires_at = now() + 5 мин`.
-- Email нормализуется и передаётся в `EmailService`. Текущая реализация
-  delivery boundary — no-op/stub; реальный provider выбирается отдельно.
+- Email нормализуется и передаётся в `EmailService`. В local-like env —
+  `NoopEmailService` (no-op, только лог). В production-like env —
+  `ResendEmailService`, реальная отправка через Resend API.
 
 ### 5.2. `POST /api/v1/auth/otp/verify`
 
@@ -346,13 +356,14 @@ limiting (§11); текущий TARDIS-75 срез его ещё не реали
 - `401 invalid_otp` — нет активного OTP, код не совпал, код истёк или уже был
   использован. Текущий backend не раскрывает отдельную причину в `error.code`,
   чтобы не усложнять первый MVP-срез.
+- `429 too_many_otp_attempts` — активный OTP получил слишком много неверных
+  попыток; код инвалидирован, пользователю нужно запросить новый OTP.
 - `422 VALIDATION_ERROR` — body/schema validation error, в стандартном
   `ApiErrorResponse` envelope.
 
-`otp_expired`, `otp_already_used` и per-OTP attempt counter — целевое
-дальнейшее уточнение контракта. Если эти коды будут добавлены, одновременно
-обновляются `api/docs/openapi.json`, `ui/openapi/auth.openapi.yaml` и
-`ui/docs/auth.md`.
+`otp_expired`, `otp_already_used` — целевое дальнейшее уточнение контракта. Если
+эти коды будут добавлены, одновременно обновляются `api/docs/openapi.json`,
+`ui/openapi/auth.openapi.yaml` и `ui/docs/auth.md`.
 
 **Side effects:**
 - Если user с этим email не существует — создаётся.
@@ -560,8 +571,9 @@ controllers не подключён.
 | `GET` | `/api/v1/notebooks/{id}` | Получить по id. 403 если `owner_id != current_user.id`. |
 | `PATCH` | `/api/v1/notebooks/{id}` | Обновление. Принимает полный массив `cells`, `title` и `deletedCells` (request-only tombstones). Conflict resolution — см. §8. |
 | `DELETE` | `/api/v1/notebooks/{id}` | Soft-delete: `deleted_at = now()`. |
+| `POST` | `/api/v1/notebooks/features-demo/restore` | Restore canonical feature-demo notebook (resurrect-only, без id в теле). См. §7.5. |
 
-**Errors (common to all 5 endpoints):**
+**Errors (common to all notebook endpoints):**
 - `401 invalid_token` — нет Bearer, битая подпись, истёкший access или
   сессия отозвана/истекла (см. §5.5).
 - `422 VALIDATION_ERROR` — body/schema validation, в стандартном
@@ -583,6 +595,30 @@ controllers не подключён.
 ```
 
 **`deletedCells`** — это «request-only tombstones»: список id ячеек, которые клиент удалил с момента последнего успешного sync. Сервер использует их в алгоритме merge (§8.1), но в БД НЕ хранит. После успешного PATCH клиент очищает свой локальный буфер `deletedCells` для этого ноутбука.
+
+### 7.5. Canonical feature-demo notebook
+
+У каждого пользователя есть один «стартовый» feature-demo notebook — seed-ноутбук, который фронт создаёт сразу после первой авторизации. Бэку нужно устойчиво отличать его от обычных ноутбуков.
+
+**Identity — детерминированный per-user id**, без отдельного поля в модели и без миграции:
+
+```
+demo_id(owner_id) = uuidv5(DEMO_NAMESPACE, str(owner_id))
+```
+
+`DEMO_NAMESPACE = 7f3a2b14-9c8d-4e6f-b1a2-c3d4e5f60718` — фиксированная константа-контракт, общая для backend (`app/modules/notebooks/demo.py`) и frontend ([UI #67](https://github.com/larchanka-training/dmc-1-t2-notebook-ui/issues/67)). Менять нельзя: смена namespace осиротит существующие demo-notebooks. ID предсказуем (любой вычислит чужой), но доступа не даёт — restore скоупится по `current_user` + owner-check.
+
+> **Остаточный риск squatting — доступность, не доступ** (accepted trade-off). Другой owner может заранее занять чужой `demo_id` обычным `POST` (id клиентский, PK глобальный) → seed/restore жертвы упрётся в 403/404, пока слот не освободят. Заменить детерминированный id на owner-scoped marker нельзя — это контракт с фронтом. Вероятность мала: нужен чужой `owner_id` (UUIDv4), cross-user в API не отдаётся, demo — некритичный контент.
+
+**`POST /api/v1/notebooks/features-demo/restore`** — resurrect-only:
+
+- soft-deleted demo → сбрасывает `deleted_at`, сохраняет прежние `cells`, `200`;
+- active demo → идемпотентно возвращает существующий (без дублей), `200`;
+- demo не найден **или** запись на этом id принадлежит другому owner → `404 NOTEBOOK_NOT_FOUND`.
+
+Эндпоинт не принимает id и не делает общий restore произвольных ноутбуков. Backend намеренно НЕ создаёт seed-контент при отсутствии demo: его сидит фронт на boot, поэтому «никогда не создавался» — явная ошибка, а не повод выдумывать ноутбук.
+
+> Frontend-сторона restore (страница `/usage`, кнопка) и парный `ui/docs/auth.md` — в [UI #67](https://github.com/larchanka-training/dmc-1-t2-notebook-ui/issues/67).
 
 ---
 
@@ -758,13 +794,34 @@ while notebook.format_version < CURRENT_FORMAT_VERSION:
 
 | Endpoint | Limit |
 |---|---|
-| `POST /api/v1/auth/otp/request` | 3 запроса / 15 мин на email. Сверх этого — важен и пер-IP limit (например 20 / 15 мин). |
-| `POST /api/v1/auth/otp/verify` | 10 попыток / 15 мин на email. Дополнительно: 5 неудачных попыток на один OTP → инвалидация этого OTP. |
+| `POST /api/v1/auth/otp/request` | Реализовано: 3 запроса / 15 мин на email (`OTP_RATE_LIMIT_PER_EMAIL`, `OTP_RATE_LIMIT_WINDOW_SECONDS`) → `429 too_many_otp_requests`. Per-IP limit (например 20 / 15 мин) остаётся future hardening. |
+| `POST /api/v1/auth/otp/verify` | Реализовано: 5 неудачных попыток на один OTP (`OTP_MAX_ATTEMPTS`) → OTP инвалидируется и возвращается `429 too_many_otp_attempts`. Отдельный rolling limit 10 попыток / 15 мин на email остаётся future hardening. |
 | `POST /api/v1/auth/refresh` | 60 / мин на sessionId. Reuse старого refresh → отзыв всей family и самой сессии (не всех сессий пользователя, см. §5.3). |
 
 - **CAPTCHA** — не в v1. Добавим если появятся злоупотребления.
-- **Sessions retention** — при logout ставится `revoked_at`. Cron удаляет записи старше **90 дней** после revocation/expiration. Объём аудита ограничен.
-- **OTP cleanup** — cron удаляет `otps WHERE expires_at < now() - interval '1 day'`.
+- **Sessions retention** — при logout ставится `revoked_at`.
+  `scripts/auth_cleanup.py run` удаляет sessions старше **90 дней** после
+  revocation/expiration и предварительно удаляет связанную refresh-token
+  history. Active sessions и недавняя reuse-detection history не удаляются.
+- **OTP cleanup** — `scripts/auth_cleanup.py run` удаляет
+  `otps WHERE expires_at < now() - interval '1 day'`.
+- **Operational model** — cleanup реализован как idempotent backend CLI,
+  который можно запускать вручную, через one-off ECS task или через будущий
+  scheduler. Повторный запуск безопасен: уже удалённые records дают нулевые
+  counters. Перед первым запуском (и после изменения retention настроек)
+  стоит сделать `python scripts/auth_cleanup.py run --dry-run`, чтобы
+  увидеть план удаления без побочных эффектов.
+- **Indexes** — миграция `0006-auth-cleanup-indexes.xml` добавляет полные
+  индексы по `otps.expires_at` и `sessions.expires_at`, а также partial
+  index по `sessions.revoked_at WHERE revoked_at IS NOT NULL`.
+  Существующие partial-индексы фильтруют `used_at IS NULL` / `revoked_at
+  IS NULL` и не подходят для cleanup-запросов, целящих в expired/revoked
+  строки.
+- **Observability** — каждый run пишет structured-лог `auth.cleanup.completed`
+  (или `auth.cleanup.previewed` для `--dry-run`) с counters и cutoff
+  timestamps. CLI дополнительно печатает JSON-сводку в stdout для
+  machine-readable вывода и логирует начало/ошибку как
+  `auth.cleanup.cli.started` / `auth.cleanup.cli.failed`.
 
 ### Изоляция исполнения пользовательского JS (frontend-слой)
 
@@ -792,11 +849,13 @@ VM) отдаёт nginx (`proxy/`), не backend-приложение. Измен
 | `OTP_TTL_SECONDS` | `300` | 5 минут. |
 | `OTP_MAX_ATTEMPTS` | `5` | Неудачных попыток до инвалидации. |
 | `OTP_RATE_LIMIT_PER_EMAIL` | `3` | Запросов / 15 мин. |
+| `OTP_RATE_LIMIT_WINDOW_SECONDS` | `900` | Окно rate limit для `OTP_RATE_LIMIT_PER_EMAIL`. |
+| `AUTH_CLEANUP_OTP_GRACE_SECONDS` | `86400` | Сколько хранить expired OTP records после `expires_at` перед cleanup. |
+| `AUTH_CLEANUP_RETENTION_SECONDS` | `7776000` | Retention для expired/revoked sessions и refresh-token history (90 дней). |
 | `ALLOW_PLACEHOLDER_AUTH` | auto | Optional override. Работает только в local-like env; в production-like env запрещён validation’ом. |
-
-Future email-provider settings (`EMAIL_PROVIDER`, `EMAIL_PROVIDER_API_KEY`,
-`EMAIL_FROM`) будут добавлены отдельной задачей при выборе провайдера. Сейчас
-таких runtime settings в `app/core/config.py` нет.
+| `RESEND_API_KEY` | `""` | API-ключ [Resend](https://resend.com) для отправки OTP-писем. Required в production-like env (validation падает, если пусто). Также используется как сигнал для factory: `get_email_service` выбирает `ResendEmailService` только для `is_production_like`, остальные env (включая нераспознанные) получают `NoopEmailService`. |
+| `EMAIL_FROM` | `noreply@example.com` | Email-адрес отправителя для OTP-писем через Resend. В production-like env должен быть переопределён на verified sender domain — дефолт `noreply@example.com` и значения, не похожие на email, отвергаются validation'ом (Resend всё равно отклонит отправку с unverified `example.com`). |
+| `RESEND_REQUEST_TIMEOUT_SECONDS` | `10` | HTTP timeout для вызовов Resend SDK. `POST /auth/otp/request` — sync route; без явного timeout'a hung-соединение к Resend заняло бы worker thread на дефолтные 30 секунд. |
 
 Существующие в `app/core/config.py` residual-переменные `token_ttl_seconds`
 (86400), `session_ttl_seconds` (604800) и `oauth_name_*` не используются новой

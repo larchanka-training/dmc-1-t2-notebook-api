@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.errors import install_error_handlers
 from app.core.logging import configure_logging
+from app.modules.ai_context import router as ai_context_router
 from app.modules.auth import router as auth_router
 from app.modules.execution import router as execution_router
 from app.modules.health import router as health_router
@@ -56,6 +57,14 @@ tags_metadata = [
         "description": (
             "Cloud code-generation endpoint backed by AWS Bedrock, protected "
             "by Bearer auth, prompt guard checks, rate limiting, and output validation."
+        ),
+    },
+    {
+        "name": "AI Context",
+        "description": (
+            "Per-notebook AI generation context: store the front-end-built "
+            "context, roll it up to the generation budget via a pluggable "
+            "summary service, and read it back (docs/ai-architecture.md §4.3)."
         ),
     },
     {
@@ -114,6 +123,7 @@ app.add_middleware(
 app.include_router(health_router, prefix=settings.api_prefix)
 app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(notebooks_router, prefix=settings.api_prefix)
+app.include_router(ai_context_router, prefix=settings.api_prefix)
 app.include_router(llm_router, prefix=settings.api_prefix)
 app.include_router(execution_router, prefix=settings.api_prefix)
 

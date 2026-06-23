@@ -23,10 +23,13 @@ from app.modules.auth.schemas.user_schemas import (
     RefreshResponse,
 )
 from app.modules.auth.services import (
+    EmailDeliveryError,
     InvalidEmailError,
     LogoutService,
+    OtpRateLimitError,
     OtpRequestService,
     OtpVerifyError,
+    OtpVerifyRateLimitError,
     OtpVerifyService,
     RefreshTokenError,
     RefreshTokenService,
@@ -41,7 +44,9 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
     responses={
         204: {"description": "OTP sent without response body"},
         400: {"model": ApiErrorResponse, "description": "Invalid email"},
+        429: {"model": ApiErrorResponse, "description": "Too many OTP requests"},
         422: {"model": ApiErrorResponse, "description": "Validation error"},
+        503: {"model": ApiErrorResponse, "description": "OTP email could not be delivered"},
     },
     summary="Request email OTP",
 )
@@ -56,6 +61,22 @@ def request_otp(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "invalid_email", "message": "Invalid email"},
+        ) from exc
+    except OtpRateLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": str(exc),
+                "message": "Too many OTP requests. Please try again later.",
+            },
+        ) from exc
+    except EmailDeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "email_delivery_failed",
+                "message": "Failed to send OTP email. Please try again later.",
+            },
         ) from exc
 
     if result.raw_code is None:
@@ -73,6 +94,7 @@ def request_otp(
     responses={
         400: {"model": ApiErrorResponse, "description": "Invalid email"},
         401: {"model": ApiErrorResponse, "description": "Invalid or expired OTP"},
+        429: {"model": ApiErrorResponse, "description": "Too many invalid OTP attempts"},
         422: {"model": ApiErrorResponse, "description": "Validation error"},
     },
     summary="Verify email OTP",
@@ -88,6 +110,14 @@ def verify_otp(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "invalid_email", "message": "Invalid email"},
+        ) from exc
+    except OtpVerifyRateLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": str(exc),
+                "message": "Too many invalid OTP attempts. Request a new code.",
+            },
         ) from exc
     except OtpVerifyError as exc:
         raise HTTPException(
