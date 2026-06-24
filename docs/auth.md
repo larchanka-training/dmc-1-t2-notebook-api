@@ -610,6 +610,11 @@ demo_id(owner_id) = uuidv5(DEMO_NAMESPACE, str(owner_id))
 
 > **Остаточный риск squatting — доступность, не доступ** (accepted trade-off). Другой owner может заранее занять чужой `demo_id` обычным `POST` (id клиентский, PK глобальный) → seed/restore жертвы упрётся в 403/404, пока слот не освободят. Заменить детерминированный id на owner-scoped marker нельзя — это контракт с фронтом. Вероятность мала: нужен чужой `owner_id` (UUIDv4), cross-user в API не отдаётся, demo — некритичный контент.
 
+**Frontend seed invariant.** В normal signed-in UI flow аккаунт с любыми server notebooks уже имел per-user demo notebook на сервере хотя бы один раз.
+Frontend сохраняет этот инвариант: когда открыт чистый never-synced seed floor, `promoteSeedFloorIfUnsynced()` сначала создаёт demo через `POST /notebooks`, затем UI создаёт новый non-demo notebook.
+Dirty или already-created seed обслуживает remote-sync engine, поэтому healthy UI path не создаёт non-demo server rows в обход demo.
+Best-effort seed promotion — liveness-компромисс frontend-клиента: transient/local failure может быть проглочен, чтобы не зацементировать UI, но такая exceptional drift не меняет backend contract и не заставляет restore endpoint создавать seed-контент с нуля.
+
 **`POST /api/v1/notebooks/features-demo/restore`** — resurrect-only:
 
 - soft-deleted demo → сбрасывает `deleted_at`, сохраняет прежние `cells`, `200`;
