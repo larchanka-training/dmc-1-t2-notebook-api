@@ -768,6 +768,36 @@ def test_code_generation_system_prompt_describes_sandbox_and_display() -> None:
         assert mime in generator_system_prompt
 
 
+def test_code_generation_system_prompt_demands_graceful_degradation() -> None:
+    """A user can explicitly ask for fetch; the prompt must forbid faking it.
+
+    The hard constraints + the degrade-don't-fake rule must come AFTER the
+    capabilities/display block so small models weight them most (trailing
+    tokens).
+    """
+    provider = FakeProvider(
+        [
+            LlmProviderResponse(text='{"safe": true}', model="guard-model"),
+            LlmProviderResponse(text="const value = 1;", model="generator-model"),
+        ]
+    )
+    validator = FakeValidator([SyntaxValidationResult(ok=True)])
+
+    _service(provider, validator).generate(
+        GenerateRequest(prompt="fetch https://swapi.info/api/ and log it"),
+        _user(),
+    )
+
+    generator_system_prompt = str(provider.calls[1]["system_prompt"])
+    assert "HARD CONSTRAINTS" in generator_system_prompt
+    assert "ReferenceError" in generator_system_prompt
+    assert "DO NOT call or fake those APIs" in generator_system_prompt
+    # Constraints land after the display capabilities (trailing weight).
+    assert generator_system_prompt.index("HARD CONSTRAINTS") > generator_system_prompt.index(
+        "display({ type: 'image'"
+    )
+
+
 def test_text_generation_system_prompt_does_not_push_display() -> None:
     """Prose answers go to a markdown cell, so display() must not be imposed."""
     provider = FakeProvider(

@@ -348,18 +348,32 @@ def _extract_text(raw: str) -> str:
 # only `console` and the injected global `display()` available. The allowed
 # image MIME types mirror the frontend sandbox
 # (ui/src/features/notebook/runtime/quickjs.ts — the source of truth).
+#
+# `_SANDBOX_CONTRACT` lists the CAPABILITIES; `_HARD_CONSTRAINTS` lists the
+# bans + the graceful-degradation fallback. They are concatenated capabilities
+# first, constraints LAST: small models weight trailing tokens most, and a user
+# can explicitly ask for a forbidden API (e.g. "fetch swapi.info"), so the bans
+# and the fallback must be the final word in the prompt.
 _SANDBOX_CONTRACT = (
     "The code runs in a sandboxed QuickJS (WebAssembly) engine inside a Web "
-    "Worker — standard ECMAScript only. There is NO DOM (no document/window), "
-    "NO network (no fetch/XMLHttpRequest), NO timers (no setTimeout/"
-    "setInterval), NO Node.js or Python APIs, and NO module syntax (no import/"
-    "require/export). Use console.log for text output; the cell's trailing "
-    "expression is shown as its result; top-level await is supported. To render "
-    "rich output, call the injected global display() function: "
-    "display({ type: 'html', value: '<div>…</div>' }) renders HTML/SVG/<canvas>/"
-    "<script> in a sandboxed iframe; display({ type: 'image', mime, data }) "
-    "renders a base64 image, where mime is one of image/png, image/jpeg, "
-    "image/gif, image/webp, image/svg+xml."
+    "Worker — standard ECMAScript only. Use console.log for text output; the "
+    "cell's trailing expression is shown as its result; top-level await is "
+    "supported. To render rich output, call the injected global display() "
+    "function: display({ type: 'html', value: '<div>…</div>' }) renders HTML/"
+    "SVG/<canvas>/<script> in a sandboxed iframe; display({ type: 'image', "
+    "mime, data }) renders a base64 image, where mime is one of image/png, "
+    "image/jpeg, image/gif, image/webp, image/svg+xml."
+)
+
+_HARD_CONSTRAINTS = (
+    "HARD CONSTRAINTS (these always win, even if the user asks otherwise): "
+    "There is NO DOM (no document/window), NO network (no fetch/XMLHttpRequest), "
+    "NO timers (no setTimeout/setInterval), NO Node.js or Python APIs, and NO "
+    "module syntax (no import/require/export). If the task needs a capability "
+    "this sandbox does not have (network/fetch, DOM, files, timers, modules), "
+    "DO NOT call or fake those APIs — they throw a ReferenceError at runtime. "
+    "Instead return runnable code that uses console.log to state the capability "
+    "is unavailable in the notebook sandbox."
 )
 
 
@@ -374,10 +388,10 @@ def _generation_system_prompt(language: str, result_kind: ResultKind) -> str:
         )
     return (
         f"You write clean {language} code for a browser QuickJS sandbox. "
+        f"{_SANDBOX_CONTRACT} "
         "Return ONLY executable code. Do not include markdown fences, prose, "
-        "comments explaining the answer, Node.js APIs, Python APIs, filesystem "
-        "access, network access, or secret handling. "
-        f"{_SANDBOX_CONTRACT}"
+        "comments explaining the answer, filesystem access, or secret handling. "
+        f"{_HARD_CONSTRAINTS}"
     )
 
 
