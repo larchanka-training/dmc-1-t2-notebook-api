@@ -342,6 +342,27 @@ def _extract_text(raw: str) -> str:
     return text
 
 
+# Description of the actual cell runtime, fed to the generator so it stops
+# producing code that can't run in the notebook (TARDIS-168). The notebook
+# executes cells in a QuickJS (WebAssembly) engine inside a Web Worker, with
+# only `console` and the injected global `display()` available. The allowed
+# image MIME types mirror the frontend sandbox
+# (ui/src/features/notebook/runtime/quickjs.ts — the source of truth).
+_SANDBOX_CONTRACT = (
+    "The code runs in a sandboxed QuickJS (WebAssembly) engine inside a Web "
+    "Worker — standard ECMAScript only. There is NO DOM (no document/window), "
+    "NO network (no fetch/XMLHttpRequest), NO timers (no setTimeout/"
+    "setInterval), NO Node.js or Python APIs, and NO module syntax (no import/"
+    "require/export). Use console.log for text output; the cell's trailing "
+    "expression is shown as its result; top-level await is supported. To render "
+    "rich output, call the injected global display() function: "
+    "display({ type: 'html', value: '<div>…</div>' }) renders HTML/SVG/<canvas>/"
+    "<script> in a sandboxed iframe; display({ type: 'image', mime, data }) "
+    "renders a base64 image, where mime is one of image/png, image/jpeg, "
+    "image/gif, image/webp, image/svg+xml."
+)
+
+
 def _generation_system_prompt(language: str, result_kind: ResultKind) -> str:
     if result_kind == "text":
         return (
@@ -355,7 +376,8 @@ def _generation_system_prompt(language: str, result_kind: ResultKind) -> str:
         f"You write clean {language} code for a browser QuickJS sandbox. "
         "Return ONLY executable code. Do not include markdown fences, prose, "
         "comments explaining the answer, Node.js APIs, Python APIs, filesystem "
-        "access, network access, or secret handling."
+        "access, network access, or secret handling. "
+        f"{_SANDBOX_CONTRACT}"
     )
 
 
