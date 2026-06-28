@@ -728,3 +728,91 @@ def test_rate_limiter_gc_idle_removes_users_with_empty_window() -> None:
     removed = limiter.gc_idle(now=future_time)
     assert removed == 1
     assert user_id not in limiter._hits
+
+
+# --- TARDIS-168: generator system prompt describes the sandbox + display() ---
+
+_ALLOWED_DISPLAY_MIMES = (
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/svg+xml",
+)
+
+
+def test_code_generation_system_prompt_describes_sandbox_and_display() -> None:
+    """The code generator must learn the QuickJS/Web Worker limits and display()."""
+    provider = FakeProvider(
+        [
+            LlmProviderResponse(text='{"safe": true}', model="guard-model"),
+            LlmProviderResponse(text="const value = 1;", model="generator-model"),
+        ]
+    )
+    validator = FakeValidator([SyntaxValidationResult(ok=True)])
+
+    _service(provider, validator).generate(
+        GenerateRequest(prompt="make a constant"),
+        _user(),
+    )
+
+    # calls[0] is the guard, calls[1] is the generator.
+    generator_system_prompt = str(provider.calls[1]["system_prompt"])
+    assert "QuickJS" in generator_system_prompt
+    assert "Web Worker" in generator_system_prompt
+    assert "NO DOM" in generator_system_prompt
+    assert "fetch" in generator_system_prompt
+    assert "display({ type: 'html'" in generator_system_prompt
+    assert "display({ type: 'image'" in generator_system_prompt
+    for mime in _ALLOWED_DISPLAY_MIMES:
+        assert mime in generator_system_prompt
+
+
+def test_code_generation_system_prompt_demands_graceful_degradation() -> None:
+    """A user can explicitly ask for fetch; the prompt must forbid faking it.
+
+    The hard constraints + the degrade-don't-fake rule must come AFTER the
+    capabilities/display block so small models weight them most (trailing
+    tokens).
+    """
+    provider = FakeProvider(
+        [
+            LlmProviderResponse(text='{"safe": true}', model="guard-model"),
+            LlmProviderResponse(text="const value = 1;", model="generator-model"),
+        ]
+    )
+    validator = FakeValidator([SyntaxValidationResult(ok=True)])
+
+    _service(provider, validator).generate(
+        GenerateRequest(prompt="fetch https://swapi.info/api/ and log it"),
+        _user(),
+    )
+
+    generator_system_prompt = str(provider.calls[1]["system_prompt"])
+    assert "HARD CONSTRAINTS" in generator_system_prompt
+    assert "ReferenceError" in generator_system_prompt
+    assert "DO NOT call or fake those APIs" in generator_system_prompt
+    # Constraints land after the display capabilities (trailing weight).
+    assert generator_system_prompt.index("HARD CONSTRAINTS") > generator_system_prompt.index(
+        "display({ type: 'image'"
+    )
+
+
+def test_text_generation_system_prompt_does_not_push_display() -> None:
+    """Prose answers go to a markdown cell, so display() must not be imposed."""
+    provider = FakeProvider(
+        [
+            LlmProviderResponse(text='{"safe": true}', model="guard-model"),
+            LlmProviderResponse(text="A constant is a fixed value.", model="generator-model"),
+        ]
+    )
+    validator = FakeValidator([])
+
+    response = _service(provider, validator).generate(
+        GenerateRequest(prompt="explain what a constant is"),
+        _user(),
+    )
+
+    assert response.result_kind == "text"
+    generator_system_prompt = str(provider.calls[1]["system_prompt"])
+    assert "display(" not in generator_system_prompt
