@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     llm_bedrock_region: str = "eu-north-1"
     llm_bedrock_guard_model_id: str = "eu.amazon.nova-micro-v1:0"
     llm_bedrock_generator_model_id: str = "eu.amazon.nova-lite-v1:0"
+    # Set to true only when cross-region EU inference profiles are unavailable
+    # (e.g. new AWS account without approved quota). Removes the eu. prefix
+    # requirement; set alongside LLM_BEDROCK_REGION and model IDs explicitly.
+    llm_bedrock_skip_eu_check: bool = False
     llm_max_prompt_bytes: int = 8_192
     llm_max_total_bytes: int = 16_384
     llm_request_timeout_seconds: int = 30
@@ -202,18 +206,19 @@ class Settings(BaseSettings):
             )
 
         if self.is_production_like:
-            for field_name, value in [
-                ("LLM_BEDROCK_GUARD_MODEL_ID", self.llm_bedrock_guard_model_id),
-                (
-                    "LLM_BEDROCK_GENERATOR_MODEL_ID",
-                    self.llm_bedrock_generator_model_id,
-                ),
-            ]:
-                if not value.startswith("eu."):
-                    raise ValueError(
-                        f"{field_name} must use an EU Geo inference profile "
-                        "with the 'eu.' prefix in production-like environments"
-                    )
+            if not self.llm_bedrock_skip_eu_check:
+                for field_name, value in [
+                    ("LLM_BEDROCK_GUARD_MODEL_ID", self.llm_bedrock_guard_model_id),
+                    (
+                        "LLM_BEDROCK_GENERATOR_MODEL_ID",
+                        self.llm_bedrock_generator_model_id,
+                    ),
+                ]:
+                    if not value.startswith("eu."):
+                        raise ValueError(
+                            f"{field_name} must use an EU Geo inference profile "
+                            "with the 'eu.' prefix in production-like environments"
+                        )
             if self.jwt_secret == DEV_JWT_SECRET or len(self.jwt_secret) < 32:
                 raise ValueError(
                     "JWT_SECRET must be set to a non-default value of at least 32 characters in production-like environments"

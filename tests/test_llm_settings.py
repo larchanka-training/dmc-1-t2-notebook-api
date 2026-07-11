@@ -63,3 +63,24 @@ def test_settings_rejects_non_eu_model_in_production(monkeypatch: pytest.MonkeyP
     # by _base_env.
     with pytest.raises(ValueError, match="LLM_BEDROCK_GENERATOR_MODEL_ID"):
         Settings(_env_file=None)
+
+
+def test_settings_skip_eu_check_allows_non_eu_model_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LLM_BEDROCK_SKIP_EU_CHECK=true bypasses the eu. prefix requirement."""
+    for key, value in _base_env(
+        {
+            "APP_ENV": "production",
+            "LLM_BEDROCK_SKIP_EU_CHECK": "true",
+            "LLM_BEDROCK_REGION": "us-east-1",
+            "LLM_BEDROCK_GENERATOR_MODEL_ID": "amazon.nova-lite-v1:0",
+            "LLM_BEDROCK_GUARD_MODEL_ID": "amazon.nova-micro-v1:0",
+            "RESEND_API_KEY": "re_test",
+            "EMAIL_FROM": "test@example.com",
+        }
+    ).items():
+        monkeypatch.setenv(key, value)
+    settings = Settings(_env_file=None)
+    assert settings.llm_bedrock_skip_eu_check is True
+    assert settings.llm_bedrock_region == "us-east-1"
