@@ -103,9 +103,12 @@ def test_bedrock_client_maps_client_errors(
     fake_client = MagicMock()
     fake_client.converse.side_effect = _client_error(provider_code)
 
-    with patch(
-        "app.modules.llm.services.bedrock_client.boto3.client",
-        return_value=fake_client,
+    with (
+        patch(
+            "app.modules.llm.services.bedrock_client.boto3.client",
+            return_value=fake_client,
+        ),
+        patch("app.modules.llm.services.bedrock_client.logger.error") as log_error,
     ):
         bedrock = BedrockClient(region_name="eu-north-1", timeout_seconds=30)
         with pytest.raises(LlmServiceError) as error:
@@ -113,6 +116,11 @@ def test_bedrock_client_maps_client_errors(
 
     assert error.value.code == expected_code
     assert error.value.status_code == expected_status
+    log_error.assert_called_once_with(
+        "bedrock.invoke.failed",
+        error_code=provider_code,
+        error_message="provider error",
+    )
 
 
 def test_bedrock_client_maps_endpoint_connection_error() -> None:

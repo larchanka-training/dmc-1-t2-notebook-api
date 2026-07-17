@@ -7,6 +7,7 @@ import json
 from threading import Lock
 from typing import Any
 
+from app.core.logging import get_logger
 from app.modules.llm.services.errors import (
     LlmProviderError,
     LlmProviderNotConfiguredError,
@@ -23,6 +24,8 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only without depende
     BotoCoreError = None
     ClientError = None
     EndpointConnectionError = None
+
+logger = get_logger(__name__)
 
 _CLIENT_CACHE: dict[tuple[str, int], Any] = {}
 _CLIENT_CACHE_LOCK = Lock()
@@ -112,7 +115,13 @@ def clear_bedrock_client_cache() -> None:
 def _map_bedrock_error(exc: Exception) -> LlmServiceError:
     """Map Bedrock/botocore failures to stable API error semantics."""
     if ClientError is not None and isinstance(exc, ClientError):
-        error_code = str(exc.response.get("Error", {}).get("Code", ""))
+        error = exc.response.get("Error", {})
+        error_code = str(error.get("Code", ""))
+        logger.error(
+            "bedrock.invoke.failed",
+            error_code=error_code,
+            error_message=str(error.get("Message", "")),
+        )
         if error_code == "AccessDeniedException":
             return LlmProviderError(
                 "LLM provider access denied",
@@ -133,6 +142,12 @@ def _map_bedrock_error(exc: Exception) -> LlmServiceError:
                 headers={"Retry-After": "60"},
             )
         return LlmProviderError("Bedrock model invocation failed")
+
+    logger.error(
+        "bedrock.invoke.failed",
+        error_type=type(exc).__name__,
+        error_message=str(exc),
+    )
 
     if EndpointConnectionError is not None and isinstance(exc, EndpointConnectionError):
         return LlmProviderError(
