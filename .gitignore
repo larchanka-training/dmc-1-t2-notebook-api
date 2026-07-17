@@ -6,3 +6,6 @@ __pycache__/
 .env
 *.pyc
 uv.lock
+
+# Python package build artefacts
+*.egg-info/
