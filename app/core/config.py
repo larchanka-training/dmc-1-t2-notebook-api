@@ -241,12 +241,23 @@ class Settings(BaseSettings):
         if self.llm_provider.strip().lower() not in ALLOWED_LLM_PROVIDERS:
             allowed = ", ".join(sorted(ALLOWED_LLM_PROVIDERS))
             raise ValueError(f"LLM_PROVIDER must be one of: {allowed}")
-        if self.llm_provider.strip().lower() == "openrouter" and not self.llm_openrouter_api_key:
+        if self.llm_provider.strip().lower() == "openrouter":
             # Fail at startup rather than on the first user request: a missing key
-            # would otherwise surface as a 503 to whoever happened to click first.
-            raise ValueError(
-                "LLM_OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter"
-            )
+            # or a blank model id would otherwise surface as a 503/502 to whoever
+            # happened to click first.
+            if not self.llm_openrouter_api_key.strip():
+                raise ValueError(
+                    "LLM_OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter"
+                )
+            for field_name, value in [
+                ("LLM_OPENROUTER_GUARD_MODEL_ID", self.llm_openrouter_guard_model_id),
+                (
+                    "LLM_OPENROUTER_GENERATOR_MODEL_ID",
+                    self.llm_openrouter_generator_model_id,
+                ),
+            ]:
+                if not value.strip():
+                    raise ValueError(f"{field_name} must not be blank")
         if self.llm_context_summary_strategy.strip() not in ALLOWED_SUMMARY_STRATEGIES:
             allowed = ", ".join(sorted(ALLOWED_SUMMARY_STRATEGIES))
             raise ValueError(

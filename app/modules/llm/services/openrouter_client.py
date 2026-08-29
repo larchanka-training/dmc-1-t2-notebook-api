@@ -79,7 +79,10 @@ class OpenRouterClient:
         app_referer: str | None = None,
         transport: Transport | None = None,
     ) -> None:
-        self.api_key = api_key
+        # Stripped: keys are copied out of a web dashboard and a trailing newline
+        # is easy to carry into an env file. An unstripped key produces a 401 that
+        # looks like "wrong key" rather than "malformed header".
+        self.api_key = api_key.strip()
         self.timeout_seconds = timeout_seconds
         self.base_url = base_url.rstrip("/")
         self.app_title = app_title
@@ -192,13 +195,18 @@ def _map_status_error(response: HttpResponse, model_id: str) -> LlmServiceError:
     change when the provider does.
     """
     status = response.status_code
-    # The provider message is logged, never returned: it can echo the request, and
-    # the UI must not receive provider internals (ai-architecture.md §8.4).
+    # METADATA ONLY (ai-architecture.md §8.5). An earlier revision logged the
+    # upstream error body here. That is unsafe for an LLM provider: an
+    # OpenAI-compatible error can echo the offending request — a moderation
+    # rejection quotes the flagged text, and a validation error can quote the
+    # message that triggered it — so the body may carry the user's prompt or
+    # notebook context. The status code is the diagnostic that matters and cannot
+    # carry user data; the body is deliberately dropped, not truncated, because a
+    # truncated prompt is still a prompt.
     logger.error(
         "openrouter.invoke.failed",
         status_code=status,
         model=model_id,
-        provider_message=_error_message(response),
     )
 
     if status in (401, 403):
@@ -228,19 +236,6 @@ def _map_status_error(response: HttpResponse, model_id: str) -> LlmServiceError:
             status_code=503,
         )
     return LlmProviderError("OpenRouter model invocation failed")
-
-
-def _error_message(response: HttpResponse) -> str:
-    """Best-effort provider error text for logs only (never returned to a user)."""
-    try:
-        body: Any = json.loads(response.body)
-    except (ValueError, TypeError):
-        return response.body[:200]
-    if isinstance(body, dict):
-        error = body.get("error")
-        if isinstance(error, dict) and isinstance(error.get("message"), str):
-            return str(error["message"])[:200]
-    return str(body)[:200]
 
 
 def _parse_completion_response(

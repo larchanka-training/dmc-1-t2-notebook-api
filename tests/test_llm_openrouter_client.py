@@ -15,6 +15,7 @@ from app.modules.llm.services.errors import (
     LlmProviderNotConfiguredError,
     LlmServiceError,
 )
+from app.modules.llm.services import openrouter_client
 from app.modules.llm.services.openrouter_client import (
     HttpResponse,
     OpenRouterClient,
@@ -165,7 +166,7 @@ def test_429_is_throttling_and_forwards_retry_after() -> None:
 
 
 def test_provider_error_body_never_reaches_the_user_message() -> None:
-    """Provider internals are logged, not returned (ai-architecture.md 8.4)."""
+    """Provider internals are not returned to the caller (ai-architecture.md 8.4)."""
     client = make_client(
         ok({"error": {"message": "internal host db-7 refused"}}, status=502)
     )
@@ -174,6 +175,42 @@ def test_provider_error_body_never_reaches_the_user_message() -> None:
         converse(client)
 
     assert "db-7" not in excinfo.value.message
+
+
+def test_provider_error_body_is_never_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Logging stays METADATA ONLY (ai-architecture.md 8.5).
+
+    An OpenAI-compatible error body can echo the offending request: a moderation
+    rejection quotes the flagged text and a validation error can quote the message
+    that triggered it. So the body may contain the user's prompt or notebook
+    context, and it must not reach the logs at all — truncating it would still
+    leave a prompt fragment.
+    """
+    captured: list[tuple[str, dict]] = []
+
+    def fake_error(event: str, **kwargs: object) -> None:
+        captured.append((event, dict(kwargs)))
+
+    monkeypatch.setattr(openrouter_client.logger, "error", fake_error)
+
+    secret_prompt = "my-notebook-secret-token-42"
+    client = make_client(
+        ok(
+            {"error": {"message": f"moderation blocked input: {secret_prompt}"}},
+            status=400,
+        )
+    )
+
+    with pytest.raises(LlmServiceError):
+        converse(client)
+
+    assert captured, "the failure path must log something"
+    for event, kwargs in captured:
+        serialized = f"{event} {kwargs}"
+        assert secret_prompt not in serialized
+        assert "moderation blocked input" not in serialized
+    # What SHOULD be there: the status code, which cannot carry user data.
+    assert any(kwargs.get("status_code") == 400 for _, kwargs in captured)
 
 
 def test_timeout_maps_to_unavailable() -> None:
