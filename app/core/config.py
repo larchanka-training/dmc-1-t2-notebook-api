@@ -25,6 +25,10 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # app/modules/ai_context/services/summary.py (kept here to avoid an import cycle;
 # validated at startup so a typo fails fast, not on the first ai-context call).
 ALLOWED_SUMMARY_STRATEGIES = {"compact-oldest", "llm"}
+# Cloud LLM providers that have an adapter. Adding a provider means adding an
+# adapter and an entry here — never a free-form base URL in configuration
+# (docs/specs/llm-openrouter-replacement-decision.md 4.1).
+ALLOWED_LLM_PROVIDERS = {"bedrock", "openrouter"}
 
 
 class Settings(BaseSettings):
@@ -68,6 +72,22 @@ class Settings(BaseSettings):
     resend_api_key: str = ""
     resend_request_timeout_seconds: int = 10
     email_from: str = DEV_EMAIL_FROM
+    # Which cloud adapter serves POST /llm/generate. Default stays "bedrock" so an
+    # existing deployment behaves exactly as before; OpenRouter is opt-in per
+    # deployment (roadmap Step 8d-1).
+    llm_provider: str = "bedrock"
+    # Server-only secret. Never returned, never logged, never sent to the browser.
+    llm_openrouter_api_key: str = ""
+    llm_openrouter_guard_model_id: str = "openrouter/free"
+    llm_openrouter_generator_model_id: str = "openrouter/free"
+    # Optional attribution headers (OpenRouter leaderboards only).
+    llm_openrouter_app_title: str = ""
+    llm_openrouter_app_referer: str = ""
+    # Comma-separated developer allowlist for the cloud LLM endpoint. EMPTY means
+    # "no restriction" so existing deployments are unaffected. Non-empty restricts
+    # POST /llm/generate to those verified account emails — used while the provider
+    # runs on a shared free tier whose daily quota any single user could exhaust.
+    llm_allowed_emails: str = ""
     llm_bedrock_region: str = "eu-north-1"
     llm_bedrock_guard_model_id: str = "eu.amazon.nova-micro-v1:0"
     llm_bedrock_generator_model_id: str = "eu.amazon.nova-lite-v1:0"
@@ -140,6 +160,25 @@ class Settings(BaseSettings):
             return self.allow_placeholder_auth and self.is_local_like
         return self.is_local_like
 
+    @property
+    def normalized_llm_provider(self) -> str:
+        """The configured provider id, lowercased and trimmed."""
+        return self.llm_provider.strip().lower()
+
+    @property
+    def llm_allowed_email_set(self) -> frozenset[str]:
+        """Parsed developer allowlist; empty frozenset means "no restriction".
+
+        Compared case-insensitively: the account email is user-entered, and an
+        allowlist that misses because of capitalisation would look like a bug
+        rather than a policy.
+        """
+        return frozenset(
+            entry.strip().lower()
+            for entry in self.llm_allowed_emails.split(",")
+            if entry.strip()
+        )
+
     @model_validator(mode="after")
     def validate_auth_settings(self) -> "Settings":
         """Validate production-sensitive auth settings."""
@@ -199,6 +238,15 @@ class Settings(BaseSettings):
             raise ValueError("EXECUTE_MAX_OUTPUT_BYTES must be positive")
         if self.execute_max_memory_mb <= 0:
             raise ValueError("EXECUTE_MAX_MEMORY_MB must be positive")
+        if self.llm_provider.strip().lower() not in ALLOWED_LLM_PROVIDERS:
+            allowed = ", ".join(sorted(ALLOWED_LLM_PROVIDERS))
+            raise ValueError(f"LLM_PROVIDER must be one of: {allowed}")
+        if self.llm_provider.strip().lower() == "openrouter" and not self.llm_openrouter_api_key:
+            # Fail at startup rather than on the first user request: a missing key
+            # would otherwise surface as a 503 to whoever happened to click first.
+            raise ValueError(
+                "LLM_OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter"
+            )
         if self.llm_context_summary_strategy.strip() not in ALLOWED_SUMMARY_STRATEGIES:
             allowed = ", ".join(sorted(ALLOWED_SUMMARY_STRATEGIES))
             raise ValueError(

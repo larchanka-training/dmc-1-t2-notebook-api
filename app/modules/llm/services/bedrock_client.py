@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 from threading import Lock
 from typing import Any
@@ -13,6 +12,9 @@ from app.modules.llm.services.errors import (
     LlmProviderNotConfiguredError,
     LlmServiceError,
 )
+# Owned by `provider` since Step 8d-1 (it is not Bedrock-specific); re-exported
+# here so existing imports of `bedrock_client.LlmProviderResponse` keep working.
+from app.modules.llm.services.provider import LlmProviderResponse
 
 try:
     import boto3
@@ -31,15 +33,12 @@ _CLIENT_CACHE: dict[tuple[str, int], Any] = {}
 _CLIENT_CACHE_LOCK = Lock()
 
 
-@dataclass(frozen=True)
-class LlmProviderResponse:
-    """Normalized model response returned by provider adapters."""
-
-    text: str
-    model: str
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    raw: dict[str, Any] = field(default_factory=dict)
+__all__ = [
+    "BedrockClient",
+    "LlmProviderResponse",
+    "clear_bedrock_client_cache",
+    "parse_guard_json",
+]
 
 
 class BedrockClient:
