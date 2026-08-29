@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.core.errors import ApiErrorResponse
 from app.modules.auth.schemas.user_schemas import CurrentUser
 from app.modules.llm.dependencies import (
+    enforce_llm_access,
     enforce_llm_body_size,
     enforce_llm_rate_limit,
     get_llm_generation_service,
@@ -33,6 +34,10 @@ _PIPELINE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm-p
         401: {
             "model": ApiErrorResponse,
             "description": "Missing or invalid access token",
+        },
+        403: {
+            "model": ApiErrorResponse,
+            "description": "Account is not on the cloud LLM allowlist",
         },
         422: {
             "model": ApiErrorResponse,
@@ -64,10 +69,14 @@ _PIPELINE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm-p
 )
 def generate_code(
     payload: GenerateRequest,
-    # Order matters. FastAPI resolves dependencies in declaration
-    # order. We authenticate first (``enforce_llm_rate_limit`` pulls
-    # ``get_current_user``) so anonymous callers never trigger the
-    # ``await request.body()`` buffering inside ``enforce_llm_body_size``.
+    # Order matters. FastAPI resolves dependencies in declaration order. We
+    # authenticate and authorize first (both pull ``get_current_user``, which
+    # FastAPI caches per request) so anonymous or non-allowlisted callers never
+    # trigger the ``await request.body()`` buffering inside
+    # ``enforce_llm_body_size`` — and, more importantly, never consume a slot of
+    # the shared provider quota. Allowlist BEFORE rate limit: a rejected caller
+    # must not spend one of their own rate-limit tokens either.
+    _access: CurrentUser = Depends(enforce_llm_access),
     current_user: CurrentUser = Depends(enforce_llm_rate_limit),
     _: None = Depends(enforce_llm_body_size),
     service: LlmGenerationService = Depends(get_llm_generation_service),

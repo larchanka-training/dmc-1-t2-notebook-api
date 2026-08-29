@@ -15,11 +15,9 @@ from app.modules.llm.schemas.llm_schemas import (
     ResultKind,
     TokenUsage,
 )
-from app.modules.llm.services.bedrock_client import (
-    BedrockClient,
-    LlmProviderResponse,
-    parse_guard_json,
-)
+from app.modules.llm.services.bedrock_client import BedrockClient, parse_guard_json
+from app.modules.llm.services.openrouter_client import OpenRouterClient
+from app.modules.llm.services.provider import LlmProvider, LlmProviderResponse
 from app.modules.llm.services.errors import (
     CodeValidationError,
     PromptRejectedError,
@@ -30,21 +28,6 @@ from app.modules.llm.services.syntax_validator import EsbuildSyntaxValidator
 from app.modules.llm.services.syntax_validator import SyntaxValidationResult
 
 logger = get_logger(__name__)
-
-
-class LlmProvider(Protocol):
-    """Provider boundary used by tests and future adapters."""
-
-    def converse(
-        self,
-        *,
-        model_id: str,
-        system_prompt: str,
-        user_prompt: str,
-        max_tokens: int,
-        temperature: float,
-    ) -> LlmProviderResponse:
-        """Return a normalized provider response."""
 
 
 class SyntaxValidator(Protocol):
@@ -484,12 +467,41 @@ def _build_repair_prompt(
     )
 
 
+def build_provider() -> tuple[LlmProvider, str, str]:
+    """Select the cloud adapter from deployment config.
+
+    Returns the provider plus ITS guard/generator model ids: model ids are
+    provider-specific (Bedrock inference profiles vs OpenRouter slugs), so they
+    travel with the adapter rather than being read separately by the caller — that
+    is how a half-switched deployment (new provider, old model ids) is made
+    impossible. ``LLM_PROVIDER`` is validated at startup, so the final branch is
+    unreachable in a booted app and exists only to keep this total.
+    """
+    provider_id = settings.normalized_llm_provider
+    if provider_id == "openrouter":
+        return (
+            OpenRouterClient(
+                api_key=settings.llm_openrouter_api_key,
+                timeout_seconds=settings.llm_request_timeout_seconds,
+                app_title=settings.llm_openrouter_app_title or None,
+                app_referer=settings.llm_openrouter_app_referer or None,
+            ),
+            settings.llm_openrouter_guard_model_id,
+            settings.llm_openrouter_generator_model_id,
+        )
+    return (
+        BedrockClient(
+            region_name=settings.llm_bedrock_region,
+            timeout_seconds=settings.llm_request_timeout_seconds,
+        ),
+        settings.llm_bedrock_guard_model_id,
+        settings.llm_bedrock_generator_model_id,
+    )
+
+
 def build_generation_service() -> LlmGenerationService:
     """Build the default generation service from application settings."""
-    provider = BedrockClient(
-        region_name=settings.llm_bedrock_region,
-        timeout_seconds=settings.llm_request_timeout_seconds,
-    )
+    provider, guard_model_id, generator_model_id = build_provider()
     syntax_validator = EsbuildSyntaxValidator(
         command=settings.llm_esbuild_command,
         timeout_seconds=settings.llm_validation_timeout_seconds,
@@ -497,8 +509,8 @@ def build_generation_service() -> LlmGenerationService:
     return LlmGenerationService(
         provider,
         syntax_validator,
-        guard_model_id=settings.llm_bedrock_guard_model_id,
-        generator_model_id=settings.llm_bedrock_generator_model_id,
+        guard_model_id=guard_model_id,
+        generator_model_id=generator_model_id,
         max_retries=settings.llm_validation_max_retries,
         max_tokens=settings.llm_max_tokens,
         temperature=settings.llm_temperature,

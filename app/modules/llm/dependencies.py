@@ -40,6 +40,44 @@ async def enforce_llm_body_size(request: Request) -> None:
     )
 
 
+def enforce_llm_access(
+    current_user: CurrentUser = Depends(get_current_user),
+) -> CurrentUser:
+    """Restrict the cloud LLM endpoint to the configured developer allowlist.
+
+    An EMPTY ``LLM_ALLOWED_EMAILS`` means no restriction, so existing deployments
+    are unaffected. A non-empty list restricts the endpoint to those account
+    emails.
+
+    Why this exists (roadmap Step 8d-1): while the provider runs on a shared free
+    tier, the daily request quota belongs to the DEPLOYMENT, not to a user — the
+    per-user rate limit caps how fast one account spends it, but not how many
+    accounts spend it, so any signed-in user could exhaust the day's quota for
+    everyone. This is the control that makes free-tier operation viable.
+
+    It is a real, server-side authorization check — unlike the UI's `llmEnabled`
+    switch, which is a device-local preference. Matching is case-insensitive; a
+    user with no email on the token is denied whenever an allowlist is configured,
+    since there is nothing to match against.
+    """
+    allowed = settings.llm_allowed_email_set
+    if not allowed:
+        return current_user
+
+    email = (current_user.email or "").strip().lower()
+    if email not in allowed:
+        # Do not echo the allowlist or the caller's email back: the message is the
+        # same for "not on the list" and "no email on the token".
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "llm_access_denied",
+                "message": "Cloud LLM generation is limited to allowlisted accounts",
+            },
+        )
+    return current_user
+
+
 def enforce_llm_rate_limit(
     current_user: CurrentUser = Depends(get_current_user),
     limiter: InMemoryRateLimiter = Depends(get_rate_limiter),
