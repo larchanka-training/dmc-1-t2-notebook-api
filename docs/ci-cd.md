@@ -117,25 +117,34 @@ Lint:
 
 ```bash
 cd api
-python -m pip install ruff
+pip install -r requirements-dev.txt
 ruff check .
 ```
 
 ## GitHub Actions CI
 
-Workflow для backend находится в `.github/workflows/api-ci.yml`.
+Workflow для backend находится в `.github/workflows/pull-request.yml`.
 
 Pipeline запускается при:
 
 - push в `main`
 - pull request в `main`
-- изменениях в `api/**` или самом workflow-файле
+- изменениях, не попадающих под `paths-ignore` workflow
 
 Этапы CI:
 
-1. `lint`: установка зависимостей и запуск `ruff check`.
+1. `lint`: установка dev-зависимостей и запуск закреплённого `ruff check`.
 2. `test`: установка dev-зависимостей и запуск `pytest`.
 3. `build`: сборка Docker-образа из `api/Dockerfile`.
+
+`ruff` закреплён в `requirements-dev.txt`, чтобы GitHub Actions не
+становился красным из-за выхода новой версии линтера с новыми правилами.
+Обновление `ruff` должно идти отдельным maintenance PR с исправлением
+возникших замечаний.
+
+Per-PR API preview на AWS/ECR/ECS удалён из этого репозитория: production
+переехал на Beget + Docker Compose/GHCR, а AWS preview-v2 считается
+архивной инфраструктурой в монорепозитории.
 
 Минимальные production-секреты для GitHub Actions:
 
