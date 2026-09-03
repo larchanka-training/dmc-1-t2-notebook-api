@@ -75,7 +75,32 @@ The ledger is **append-only**. It is evidence, not state: quota decisions read t
 counters in §4.2, never `SUM()` over this table. A sum over an unbounded table is
 both slow and racy.
 
-### 4.2 `users.llm_usage_counter` — the enforcement state
+### 4.2 `users.llm_usage_reservation` — the durable pre-call record
+
+**Added after review.** The first draft referenced a `reservation_id` from the ledger
+but never defined the row it points at, and asked reconciliation to find "reservations
+older than a threshold with no ledger row". That is not executable: the counter is an
+aggregate and keeps neither reservation ids nor per-reservation timestamps. Without
+this table the reconciliation job in §5.3 cannot be written at all.
+
+| column | type | note |
+|---|---|---|
+| `id` | `uuid` PK | the `reservation_id` the ledger references |
+| `user_id` | `uuid` FK → `users.users(id)` | |
+| `request_id` | `uuid` | one `/llm/generate` request |
+| `call_cost` | `integer` | provider calls authorised (2 for a generation, 1 for a repair) |
+| `cost_reserved_micros` | `bigint` | conservative upper bound, see §6 |
+| `state` | `text` | `reserved` \| `settled` \| `released` \| `abandoned` |
+| `created_at` / `settled_at` | `timestamptz` | `settled_at` NULL while open |
+
+Index on `(state, created_at)` — the reconciliation job's only query.
+
+**Settlement is idempotent**: it transitions `reserved → settled` with a conditional
+`UPDATE ... WHERE state = 'reserved'`, and writes the ledger rows in the same
+transaction. A retried settle affects zero rows and writes nothing, so a duplicate
+worker or a retried job cannot double-count.
+
+### 4.3 `users.llm_usage_counter` — the enforcement state
 
 | column | type | note |
 |---|---|---|
@@ -85,7 +110,8 @@ both slow and racy.
 | `window_start` | `date` | UTC window boundary |
 | `calls_reserved` | `integer` | incremented **before** the provider call |
 | `calls_settled` | `integer` | incremented after it returns |
-| `cost_micros` | `bigint` | settled estimate |
+| `cost_reserved_micros` | `bigint` | conservative upper bound, reserved before the call (§6) |
+| `cost_micros` | `bigint` | settled estimate (§6) |
 
 Primary key `(scope, scope_key, window_kind, window_start)`.
 
@@ -93,7 +119,7 @@ Primary key `(scope, scope_key, window_kind, window_start)`.
 only for reconciliation and reporting — a gap between the two is the count of calls
 that were authorised and never settled (§5.3).
 
-### 4.3 `users.llm_entitlement` — per-user overrides
+### 4.4 `users.llm_entitlement` — per-user overrides
 
 | column | type | note |
 |---|---|---|
@@ -122,17 +148,30 @@ One statement per scope, inside the request transaction:
 
 ```sql
 INSERT INTO users.llm_usage_counter AS c
-       (scope, scope_key, window_kind, window_start, calls_reserved)
-VALUES (:scope, :key, :window_kind, :window_start, :cost)
+       (scope, scope_key, window_kind, window_start,
+        calls_reserved, cost_reserved_micros)
+SELECT :scope, :key, :window_kind, :window_start, :cost, :cost_micros
+ WHERE :cost <= :call_limit                 -- guards the INSERT path
+   AND :cost_micros <= :cost_limit_micros
 ON CONFLICT (scope, scope_key, window_kind, window_start) DO UPDATE
-   SET calls_reserved = c.calls_reserved + :cost
- WHERE c.calls_reserved + :cost <= :limit
+   SET calls_reserved       = c.calls_reserved + :cost,
+       cost_reserved_micros = c.cost_reserved_micros + :cost_micros
+ WHERE c.calls_reserved + :cost <= :call_limit          -- guards the UPDATE path
+   AND c.cost_reserved_micros + :cost_micros <= :cost_limit_micros
 RETURNING calls_reserved;
 ```
 
-No row returned ⇒ the cap would be exceeded ⇒ reject with `429 llm_quota_exceeded`
+No row returned ⇒ a cap would be exceeded ⇒ reject with `429 llm_quota_exceeded`
 (§8). The check and the increment are the same statement, so there is no window to
 race in.
+
+**Both paths must be guarded — this was a hole in the first draft.** A plain
+`INSERT ... VALUES` with the condition only on `DO UPDATE` inserts the first row of a
+window *unconditionally*: with `limit = 1` and `cost = 2`, the very first request of
+the day would be admitted, and only the second would be refused. The `INSERT ...
+SELECT ... WHERE` form makes the insert conditional too. **The test that proves this
+must start from an empty table**, because a test that pre-seeds the counter row never
+exercises the insert path and would have passed against the broken version.
 
 **`:cost` is 2, not 1**, for a normal generation: the pipeline will make a guard call
 and a generator call. Reserving 1 and discovering the shortfall halfway through would
@@ -158,30 +197,84 @@ A reservation is released only when the call **provably did not reach the provid
 released: the request may well have been served and billed.
 
 If the process dies between reserve and settle, the reservation stands. That is the
-fail-closed direction: the deployment slightly over-counts rather than over-spends. A
-periodic reconciliation job may convert reservations older than a threshold with no
-matching ledger row into a settled `status = 'unknown'` event; it must never simply
-decrement, or a crash becomes a way to mint quota.
+fail-closed direction: the deployment slightly over-counts rather than over-spends.
 
-### 5.4 Database failures deny
+The reconciliation job is now expressible, because §4.2 gives it a row to find: select
+`llm_usage_reservation` where `state = 'reserved'` and `created_at` is older than the
+threshold, and transition each to `abandoned` while appending a ledger row with
+`status = 'unknown'`. It must never simply decrement the counter, or a crash becomes a
+way to mint quota. Because settlement is idempotent (§4.2), a reservation that settles
+late cannot be counted twice.
+
+### 5.4 Transaction and session boundaries
+
+**Added after review; this is a correctness requirement, not a style note.** The
+current pipeline makes the obvious implementation wrong:
+
+- `POST /llm/generate` submits the whole guard → generate → validate → repair
+  pipeline to a `ThreadPoolExecutor`, and the controller documents that "the in-flight
+  worker keeps running until the provider returns" after the HTTP response has
+  already been sent on timeout (`controllers/llm_controller.py`);
+- `get_db` is a **request-scoped** session whose transaction commits when the *route*
+  returns and closes right after (`core/db.py`).
+
+So a reservation written through the request session may be committed — or rolled
+back, or its session closed — at a moment that has nothing to do with the provider
+call it was supposed to authorise. On the timeout path the route returns 504 while
+the worker is still running; anything it then tries to write goes through a session
+that is already gone.
+
+The contract is therefore:
+
+1. **Two short transactions, never one long one:**
+   `reserve → COMMIT` → *provider call* → `settle → COMMIT`.
+2. **No transaction is held open across the provider call.** It can take up to 30s;
+   holding a row-locking transaction that long across the whole user base is its own
+   outage.
+3. **The worker owns its own session**, created from the sessionmaker inside the
+   pipeline thread and closed by it. The request-scoped `get_db` session must not be
+   passed into the executor — it belongs to a request that may already have returned.
+4. The reservation must be **committed before the provider call is made**. A
+   reservation that is still uncommitted has authorised nothing.
+
+This also makes the crash semantics in §5.3 real: because the reservation is
+committed on its own, it survives the worker dying mid-call, which is exactly the
+state reconciliation is written to find.
+
+### 5.5 Database failures deny
 
 If the reservation statement itself fails, the request is **denied**, not allowed
 through. The whole purpose is protecting a shared, exhaustible resource; degrading
 open would remove the control exactly when the system is unhealthy.
 
-## 6. Cost estimation
+## 6. Cost: reserved as an upper bound, settled as an estimate
 
-`estimated_cost_micros` is computed from a configured per-model price map
-(micro-USD per 1K prompt/completion tokens) at settle time. It is explicitly an
-**estimate**:
+**Corrected after review.** The first draft recorded cost only *after* the provider
+answered and let an unknown model contribute **0**. That does not produce a ceiling
+at all: nothing is reserved before the call, so concurrent requests can all pass the
+check and collectively blow past the limit, and an unmapped model spends real money
+while counting as free. A limit that can be exceeded is telemetry wearing a limit's
+clothes.
 
-- the free router serves a model chosen per request, so the price is not known before
-  the call;
-- provider pricing changes without a deployment.
+Two different numbers, and the distinction matters:
 
-It is adequate for a global "stop at N" ceiling and for a usage view. It is **not** a
-billing figure and must never be shown as money owed. A model missing from the price
-map contributes 0 and is logged — a wrong price is worse than a known gap.
+- **`cost_reserved_micros` — a conservative upper bound, reserved BEFORE the call**
+  and enforced by the same atomic statement as the call count (§5.1). It is computed
+  from `max_tokens` (the pipeline's own cap) times the **most expensive price the
+  request could incur**: the configured price for a pinned model, or — when the model
+  is chosen by the router or missing from the price map — a configured
+  `LLM_WORST_CASE_PRICE_MICROS` floor. An unknown model must cost the *worst* assumed
+  price, never 0.
+- **`estimated_cost_micros` — the settled estimate**, computed from the actual token
+  usage the provider reported. This is the number the usage view shows.
+
+At settle time the reservation's upper bound is released and replaced by the settled
+estimate, so the window's reserved total converges downward rather than drifting up.
+
+Neither number is a billing figure and neither may be presented as money owed:
+provider pricing changes without a deployment, and the free router picks the model
+per request. They are good enough to stop spending and to show a user roughly what
+they have used — nothing more.
 
 ## 7. Limits
 
@@ -190,7 +283,7 @@ map contributes 0 and is logged — a wrong price is worse than a known gap.
 | daily provider calls | user | tier default, overridable per user |
 | monthly provider calls | user | tier default, overridable per user |
 | daily provider calls | global | deployment config |
-| monthly estimated cost | global | deployment config |
+| monthly cost ceiling | global | deployment config — enforced on `cost_reserved_micros` (§6), so it is a real bound rather than a post-hoc observation |
 
 Developers on the Step 8d-1 allowlist map to `tier = 'developer'` with higher limits;
 the allowlist stays the gate for *access*, entitlements become the gate for *volume*.
@@ -225,15 +318,25 @@ When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
 
 ## 10. Implementation split (each a separate PR)
 
-- **8e-1** — Liquibase changesets for the three tables (`users` schema, per
-  `domain-boundaries.md`), plus repository and settings surface. No behaviour change.
+- **8e-1** — Liquibase changesets for the **four** tables (ledger, reservation,
+  counter, entitlement — `users` schema, per `domain-boundaries.md`), plus repository
+  and settings surface. No behaviour change.
 - **8e-2** — the reservation/settlement service, wired into the generation pipeline,
-  with the `llm_quota_exceeded` error and its OpenAPI + ui contract sync. Tests must
-  cover the concurrency case (two simultaneous requests at cap-1 ⇒ exactly one
-  succeeds) with a real database, not a mock — a mocked counter cannot demonstrate
-  the property the design exists for.
-- **8e-3** — the usage view endpoints, and the reconciliation job for stale
-  reservations.
+  with the `llm_quota_exceeded` error and its OpenAPI + ui contract sync.
+
+  Required tests, each against a **real database** — a mocked counter cannot
+  demonstrate any of these:
+  1. two simultaneous requests at cap-1 ⇒ exactly one succeeds;
+  2. **the first request of a window is refused when its cost exceeds the limit**
+     (starting from an EMPTY table, so the `INSERT` path is exercised — a test that
+     pre-seeds the counter row would pass against the broken version);
+  3. settlement is idempotent — settling twice counts once;
+  4. a reservation is **committed before** the provider call, and survives the worker
+     being killed mid-call;
+  5. the cost ceiling refuses a request whose *reserved upper bound* would exceed it,
+     including when the served model is unknown to the price map.
+- **8e-3** — the usage view endpoints, and the reconciliation job that transitions
+  stale `reserved` rows to `abandoned` with an `unknown` ledger entry.
 
 Cloud LLM stays allowlist-only until 8e-2 is deployed.
 
