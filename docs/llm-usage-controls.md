@@ -64,10 +64,15 @@ One row per **provider call**, not per user request. A generation writes two row
 | `call_kind` | `text` | `guard` \| `generator` \| `repair` |
 | `provider` | `text` | `openrouter` \| `bedrock` — the adapter that served it |
 | `model_id` | `text` | the model the provider *actually served* |
-| `status` | `text` | `ok` \| `provider_error` \| `timeout` |
+| `status` | `text` | `ok` \| `provider_error` \| `timeout` \| `unknown` |
 | `prompt_tokens` / `completion_tokens` | `integer` | 0 when the provider omits usage |
 | `estimated_cost_micros` | `bigint` | see §6; an estimate, never a billing figure |
 | `created_at` | `timestamptz` | |
+
+`unknown` is written **only** by reconciliation (§5.3), for a call that was authorised
+and whose outcome cannot be established because the worker died. It exists in this
+enum because the reconciliation job needs a status to write; the first draft told the
+job to write one that the schema did not define.
 
 Indexes: `(user_id, created_at)` for the usage view, `(request_id)` for tracing.
 
@@ -88,10 +93,19 @@ this table the reconciliation job in §5.3 cannot be written at all.
 | `id` | `uuid` PK | the `reservation_id` the ledger references |
 | `user_id` | `uuid` FK → `users.users(id)` | |
 | `request_id` | `uuid` | one `/llm/generate` request |
-| `call_cost` | `integer` | provider calls authorised (2 for a generation, 1 for a repair) |
+| `call_cost` | `integer` | provider calls **authorised** (2 for a generation, 1 for a repair) |
+| `calls_used` | `integer` | provider calls actually **issued** so far, incremented as each one is made |
 | `cost_reserved_micros` | `bigint` | conservative upper bound, see §6 |
 | `state` | `text` | `reserved` \| `settled` \| `released` \| `abandoned` |
 | `created_at` / `settled_at` | `timestamptz` | `settled_at` NULL while open |
+
+**`calls_used` is what makes recovery possible.** A reservation authorises two calls
+(guard, generator), but after a crash the aggregate alone cannot say whether one, both
+or neither was issued — so the promise of "a ledger row per provider call" could not be
+kept. Each call increments `calls_used` in the same short transaction that appends its
+own ledger row, so `call_cost - calls_used` is exactly the number of authorised calls
+with no recorded outcome. Reconciliation writes that many `status = 'unknown'` rows
+(§5.3) — usually zero or one, never a guess.
 
 Index on `(state, created_at)` — the reconciliation job's only query.
 
@@ -157,13 +171,23 @@ ON CONFLICT (scope, scope_key, window_kind, window_start) DO UPDATE
    SET calls_reserved       = c.calls_reserved + :cost,
        cost_reserved_micros = c.cost_reserved_micros + :cost_micros
  WHERE c.calls_reserved + :cost <= :call_limit          -- guards the UPDATE path
-   AND c.cost_reserved_micros + :cost_micros <= :cost_limit_micros
+   -- BOTH cost columns: `cost_micros` is money already spent and settled, and
+   -- omitting it made the ceiling reset itself on every settlement (see below).
+   AND c.cost_micros + c.cost_reserved_micros + :cost_micros <= :cost_limit_micros
 RETURNING calls_reserved;
 ```
 
 No row returned ⇒ a cap would be exceeded ⇒ reject with `429 llm_quota_exceeded`
 (§8). The check and the increment are the same statement, so there is no window to
 race in.
+
+**The cost check must span both columns.** At settlement a reservation's upper bound
+moves out of `cost_reserved_micros` and the actual estimate lands in `cost_micros`
+(§6). A check that reads only the reserved column therefore forgets every settled
+request: after each settlement the window looks empty again, and the "monthly cost
+ceiling" would never bind. Summing `cost_micros + cost_reserved_micros + new bound`
+is what makes it a ceiling on the window rather than on whatever happens to be
+in flight.
 
 **Both paths must be guarded — this was a hole in the first draft.** A plain
 `INSERT ... VALUES` with the condition only on `DO UPDATE` inserts the first row of a
@@ -180,15 +204,30 @@ reserved individually, before each retry, and a refused reservation ends the rep
 loop rather than failing the request (the unrepaired result is returned as it would
 be on exhausted retries).
 
-Scopes are reserved in a fixed order — **global, then user** — so concurrent requests
-cannot deadlock on the two rows. If the user reservation fails after the global one
-succeeded, the global reservation is released in the same transaction.
+A reservation touches up to **four** counter rows — two scopes × two windows — so
+"global before user" is not a total order and does not prevent deadlock on its own.
+The full order is:
+
+```
+global/day → global/month → user/day → user/month
+```
+
+Every transaction acquires them in exactly that sequence, so two concurrent requests
+can never hold one row while waiting for another the other already holds. If a later
+row's check fails, the earlier reservations are released in the same transaction —
+they were never committed, so this is a rollback, not compensation.
 
 ### 5.2 Settle
 
-After the provider call returns, in one transaction: append the ledger row and
-increment `calls_settled` / `cost_micros`. Settlement never re-checks the cap; the
-authorisation already happened.
+After the provider call returns, in one transaction: append the ledger row, increment
+`calls_settled`, and **move** cost between the two columns — subtract this
+reservation's `cost_reserved_micros` and add the settled `estimated_cost_micros`. The
+window total (`cost_micros + cost_reserved_micros`) therefore falls from the
+pessimistic bound to the real estimate instead of double-counting the request.
+
+Settlement never re-checks the cap: the authorisation already happened, and re-checking
+could refuse to record spending that has already occurred — the one thing the ledger
+must never do.
 
 ### 5.3 Release, and what happens on a crash
 
@@ -201,8 +240,9 @@ fail-closed direction: the deployment slightly over-counts rather than over-spen
 
 The reconciliation job is now expressible, because §4.2 gives it a row to find: select
 `llm_usage_reservation` where `state = 'reserved'` and `created_at` is older than the
-threshold, and transition each to `abandoned` while appending a ledger row with
-`status = 'unknown'`. It must never simply decrement the counter, or a crash becomes a
+threshold, and transition each to `abandoned` while appending exactly
+`call_cost - calls_used` ledger rows with `status = 'unknown'` — the calls that were
+authorised but whose outcome was never recorded. It must never simply decrement the counter, or a crash becomes a
 way to mint quota. Because settlement is idempotent (§4.2), a reservation that settles
 late cannot be counted twice.
 
@@ -260,11 +300,20 @@ Two different numbers, and the distinction matters:
 
 - **`cost_reserved_micros` — a conservative upper bound, reserved BEFORE the call**
   and enforced by the same atomic statement as the call count (§5.1). It is computed
-  from `max_tokens` (the pipeline's own cap) times the **most expensive price the
-  request could incur**: the configured price for a pinned model, or — when the model
-  is chosen by the router or missing from the price map — a configured
-  `LLM_WORST_CASE_PRICE_MICROS` floor. An unknown model must cost the *worst* assumed
-  price, never 0.
+  from **both** token directions at the most expensive price the request could
+  incur — providers bill input as well as output:
+
+  ```
+  bound = (LLM_MAX_TOTAL_BYTES  as tokens) * prompt_price_micros_per_1k / 1000
+        + (llm_max_tokens)               * completion_price_micros_per_1k / 1000
+  ```
+
+  The prompt side uses the pipeline's own byte cap (`LLM_MAX_TOTAL_BYTES`, converted
+  with a deliberately pessimistic bytes-per-token ratio), because that is the most
+  the request is allowed to send. Prices come from the configured map for a pinned
+  model, or from a configured `LLM_WORST_CASE_PRICE_MICROS` when the model is chosen
+  by the router or missing from the map. An unknown model must cost the *worst*
+  assumed price, never 0.
 - **`estimated_cost_micros` — the settled estimate**, computed from the actual token
   usage the provider reported. This is the number the usage view shows.
 
@@ -334,7 +383,13 @@ When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
   4. a reservation is **committed before** the provider call, and survives the worker
      being killed mid-call;
   5. the cost ceiling refuses a request whose *reserved upper bound* would exceed it,
-     including when the served model is unknown to the price map.
+     including when the served model is unknown to the price map;
+  6. **the ceiling still binds after settlement** — settle a request, then assert the
+     next one is refused because `cost_micros` counts toward the limit. A test that
+     only ever reserves would pass against a check that reads the reserved column
+     alone;
+  7. after a crash with one of two authorised calls issued, reconciliation writes
+     **exactly one** `unknown` ledger row, not two and not zero.
 - **8e-3** — the usage view endpoints, and the reconciliation job that transitions
   stale `reserved` rows to `abandoned` with an `unknown` ledger entry.
 
