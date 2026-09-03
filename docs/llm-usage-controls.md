@@ -80,39 +80,49 @@ The ledger is **append-only**. It is evidence, not state: quota decisions read t
 counters in §4.2, never `SUM()` over this table. A sum over an unbounded table is
 both slow and racy.
 
-### 4.2 `users.llm_usage_reservation` — the durable pre-call record
+### 4.2 `users.llm_usage_reservation` — one durable row per planned provider call
 
-**Added after review.** The first draft referenced a `reservation_id` from the ledger
-but never defined the row it points at, and asked reconciliation to find "reservations
-older than a threshold with no ledger row". That is not executable: the counter is an
-aggregate and keeps neither reservation ids nor per-reservation timestamps. Without
-this table the reconciliation job in §5.3 cannot be written at all.
+**Reworked twice.** Draft 1 referenced a reservation that did not exist. Draft 2 added
+one row per *request* with a `calls_used` counter — still wrong, because an aggregate
+cannot answer the only questions recovery asks: *which* call was this, did it reach
+the provider, and what should its ledger row say? The unit of reservation must be the
+unit of accounting, and that unit is **one provider call**.
 
 | column | type | note |
 |---|---|---|
 | `id` | `uuid` PK | the `reservation_id` the ledger references |
 | `user_id` | `uuid` FK → `users.users(id)` | |
-| `request_id` | `uuid` | one `/llm/generate` request |
-| `call_cost` | `integer` | provider calls **authorised** (2 for a generation, 1 for a repair) |
-| `calls_used` | `integer` | provider calls actually **issued** so far, incremented as each one is made |
-| `cost_reserved_micros` | `bigint` | conservative upper bound, see §6 |
-| `state` | `text` | `reserved` \| `settled` \| `released` \| `abandoned` |
-| `created_at` / `settled_at` | `timestamptz` | `settled_at` NULL while open |
-
-**`calls_used` is what makes recovery possible.** A reservation authorises two calls
-(guard, generator), but after a crash the aggregate alone cannot say whether one, both
-or neither was issued — so the promise of "a ledger row per provider call" could not be
-kept. Each call increments `calls_used` in the same short transaction that appends its
-own ledger row, so `call_cost - calls_used` is exactly the number of authorised calls
-with no recorded outcome. Reconciliation writes that many `status = 'unknown'` rows
-(§5.3) — usually zero or one, never a guess.
+| `request_id` | `uuid` | groups the calls of one `/llm/generate` request |
+| `call_kind` | `text` | `guard` \| `generator` \| `repair` — known when the row is created |
+| `state` | `text` | `reserved` → `started` → `settled` \| `released` \| `unknown` |
+| `cost_reserved_micros` | `bigint` | this call's conservative upper bound (§6) |
+| `created_at` | `timestamptz` | |
+| `started_at` | `timestamptz` NULL | set when the request is about to be sent |
+| `closed_at` | `timestamptz` NULL | set on `settled` / `released` / `unknown` |
 
 Index on `(state, created_at)` — the reconciliation job's only query.
 
-**Settlement is idempotent**: it transitions `reserved → settled` with a conditional
-`UPDATE ... WHERE state = 'reserved'`, and writes the ledger rows in the same
-transaction. A retried settle affects zero rows and writes nothing, so a duplicate
-worker or a retried job cannot double-count.
+**The states are what make recovery decidable:**
+
+- `reserved` — authorised, **not yet sent**. If the worker dies here the call provably
+  never reached the provider, so reconciliation **releases** it and the quota returns.
+- `started` — committed *immediately before* the HTTP request goes out. If the worker
+  dies here the provider may well have served and billed it, so reconciliation closes
+  it as `unknown` and the quota stays spent. Draft 2 could not tell these two apart,
+  which is exactly why it could not keep its own promise.
+- `settled` — the call returned and its ledger row was written in the same
+  transaction.
+- `released` — the call is known not to happen. The ordinary case is a **guard
+  rejection**: the prompt is refused, so the generator call will never be made and its
+  reservation is released within the request. Draft 2 had no way to express this
+  partial outcome, so a rejected prompt silently kept a generator call's quota.
+
+`call_kind` lives here, not only on the ledger, so a synthetic `unknown` row can state
+which call it was. The served model is genuinely unknowable in that case and is
+recorded as NULL — a guess would be worse than a gap.
+
+A normal generation creates **two** rows (guard, generator) in one reserve
+transaction; each repair attempt creates one more, reserved before it runs.
 
 ### 4.3 `users.llm_usage_counter` — the enforcement state
 
@@ -199,7 +209,14 @@ exercises the insert path and would have passed against the broken version.
 
 **`:cost` is 2, not 1**, for a normal generation: the pipeline will make a guard call
 and a generator call. Reserving 1 and discovering the shortfall halfway through would
-spend a provider call and then fail the user — the worst of both. Repair retries are
+spend a provider call and then fail the user — the worst of both.
+
+Concretely, one reserve transaction does both things: **one counter update of `+2`**
+and **two `llm_usage_reservation` rows** (§4.2), one per planned call, each carrying
+its own `cost_reserved_micros` (§6) so `:cost_micros` is their sum. The counter is the
+enforcement state; the rows are what recovery and partial release act on. A guard
+rejection later releases the generator's row and decrements the counter by 1 — which
+is expressible only because the rows are per call. Repair retries are
 reserved individually, before each retry, and a refused reservation ends the repair
 loop rather than failing the request (the unrepaired result is returned as it would
 be on exhausted retries).
@@ -217,34 +234,54 @@ can never hold one row while waiting for another the other already holds. If a l
 row's check fails, the earlier reservations are released in the same transaction —
 they were never committed, so this is a rollback, not compensation.
 
-### 5.2 Settle
+### 5.2 Start and settle
 
-After the provider call returns, in one transaction: append the ledger row, increment
-`calls_settled`, and **move** cost between the two columns — subtract this
-reservation's `cost_reserved_micros` and add the settled `estimated_cost_micros`. The
-window total (`cost_micros + cost_reserved_micros`) therefore falls from the
-pessimistic bound to the real estimate instead of double-counting the request.
+Each call goes through two extra short transactions of its own:
 
-Settlement never re-checks the cap: the authorisation already happened, and re-checking
-could refuse to record spending that has already occurred — the one thing the ledger
-must never do.
+1. **before sending** — `reserved → started`, `started_at = now()`, COMMIT. This is
+   the only thing that distinguishes "never sent" from "may have been billed";
+2. **after it returns** — `started → settled` plus its ledger row plus the counter
+   update, in one transaction: increment `calls_settled`, and **move** cost by
+   subtracting this call's `cost_reserved_micros` and adding its settled
+   `estimated_cost_micros`. The window total (`cost_micros + cost_reserved_micros`)
+   therefore falls from the pessimistic bound to the real estimate instead of
+   double-counting.
+
+Both transitions are conditional on the current state (`WHERE state = 'reserved'` /
+`WHERE state = 'started'`), so they are **idempotent**: a retried settle affects zero
+rows and writes nothing.
+
+Settlement never re-checks the cap. The authorisation already happened, and
+re-checking could refuse to record spending that has already occurred — the one thing
+the ledger must never do.
 
 ### 5.3 Release, and what happens on a crash
 
-A reservation is released only when the call **provably did not reach the provider**
-(a configuration error, or a refusal by a later scope in §5.1). A timeout is **not**
-released: the request may well have been served and billed.
+A reservation is **released** only when its call provably will not happen. Two cases,
+both ordinary:
 
-If the process dies between reserve and settle, the reservation stands. That is the
-fail-closed direction: the deployment slightly over-counts rather than over-spends.
+- **guard rejection** — the guard refuses the prompt, so the generator call will never
+  be made; its `reserved` row is released and the counter decremented within the
+  request. Without this, every rejected prompt would permanently consume a
+  generator's worth of quota;
+- a later scope's check fails during reservation (§5.1), which is a rollback of an
+  uncommitted transaction rather than a compensation.
 
-The reconciliation job is now expressible, because §4.2 gives it a row to find: select
-`llm_usage_reservation` where `state = 'reserved'` and `created_at` is older than the
-threshold, and transition each to `abandoned` while appending exactly
-`call_cost - calls_used` ledger rows with `status = 'unknown'` — the calls that were
-authorised but whose outcome was never recorded. It must never simply decrement the counter, or a crash becomes a
-way to mint quota. Because settlement is idempotent (§4.2), a reservation that settles
-late cannot be counted twice.
+A call in `started` is **never** released, including on timeout: the provider may have
+served and billed it.
+
+**Crash recovery is decidable because the states carry the distinction:**
+
+| state at crash | what it means | reconciliation |
+|---|---|---|
+| `reserved` | request never sent | close as `released`, decrement the counter |
+| `started` | may have been served and billed | close as `unknown`, counter unchanged, append one ledger row with `status = 'unknown'`, `call_kind` from the reservation, `model_id` NULL |
+
+The job selects reservations older than a threshold in either open state. It must
+never simply decrement a `started` row, or crashing becomes a way to mint quota; and
+it must not leave `reserved` rows charged, or a dead worker permanently taxes the
+user. Because every transition is conditional on state, a reservation that settles
+late cannot be double-counted.
 
 ### 5.4 Transaction and session boundaries
 
@@ -299,21 +336,40 @@ clothes.
 Two different numbers, and the distinction matters:
 
 - **`cost_reserved_micros` — a conservative upper bound, reserved BEFORE the call**
-  and enforced by the same atomic statement as the call count (§5.1). It is computed
-  from **both** token directions at the most expensive price the request could
-  incur — providers bill input as well as output:
+  and enforced by the same atomic statement as the call count (§5.1). Because §4.2
+  reserves **per call**, each row carries the bound for *its own* call and the request
+  total is simply their sum — a generation reserves `guard + generator`, not one
+  call's worth.
+
+  Per call, both token directions (providers bill input as well as output):
 
   ```
-  bound = (LLM_MAX_TOTAL_BYTES  as tokens) * prompt_price_micros_per_1k / 1000
-        + (llm_max_tokens)               * completion_price_micros_per_1k / 1000
+  bound(call) = input_tokens_max(call)  * prompt_price_micros_per_1k     / 1000
+              + output_tokens_max(call) * completion_price_micros_per_1k / 1000
   ```
 
-  The prompt side uses the pipeline's own byte cap (`LLM_MAX_TOTAL_BYTES`, converted
-  with a deliberately pessimistic bytes-per-token ratio), because that is the most
-  the request is allowed to send. Prices come from the configured map for a pinned
-  model, or from a configured `LLM_WORST_CASE_PRICE_MICROS` when the model is chosen
-  by the router or missing from the map. An unknown model must cost the *worst*
-  assumed price, never 0.
+  `input_tokens_max` is **not** `LLM_MAX_TOTAL_BYTES` alone. That setting bounds the
+  HTTP request body; the server then adds its own system prompt, and — for the guard
+  — a serialised, truncated copy of the notebook context. The bound must therefore be
+
+  ```
+  input_tokens_max(call) = tokens(LLM_MAX_TOTAL_BYTES)
+                         + tokens(configured system-prompt allowance for that call)
+  ```
+
+  with a deliberately pessimistic bytes-per-token ratio. Draft 2 used the body cap
+  only and applied it once, so the "upper bound" could be under the real cost twice
+  over: it ignored the server-side prompt, and it priced one call while the pipeline
+  makes two.
+
+  `output_tokens_max` is `llm_max_tokens` for the generator and repair calls; the
+  guard's own cap is smaller and configured separately, since it returns a one-field
+  JSON verdict rather than code.
+
+  Prices come from the configured map for a pinned model, or from a configured
+  `LLM_WORST_CASE_PRICE_MICROS` when the model is chosen by the router or missing from
+  the map. An unknown model must cost the *worst* assumed price, never 0.
+
 - **`estimated_cost_micros` — the settled estimate**, computed from the actual token
   usage the provider reported. This is the number the usage view shows.
 
@@ -375,21 +431,30 @@ When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
 
   Required tests, each against a **real database** — a mocked counter cannot
   demonstrate any of these:
-  1. two simultaneous requests at cap-1 ⇒ exactly one succeeds;
-  2. **the first request of a window is refused when its cost exceeds the limit**
-     (starting from an EMPTY table, so the `INSERT` path is exercised — a test that
-     pre-seeds the counter row would pass against the broken version);
+
+  1. two simultaneous generations, with the counter pre-set to
+     **`limit - call_cost`** (not `limit - 1`), ⇒ exactly one succeeds. The unit
+     matters: a generation reserves **two** provider calls, so at `limit - 1`
+     *neither* request can pass and the test would prove nothing while looking green;
+  2. the first request of a window is refused when its cost exceeds the limit,
+     starting from an **empty table** so the `INSERT` path is exercised — a test that
+     pre-seeds the counter row would pass against an unguarded insert;
   3. settlement is idempotent — settling twice counts once;
-  4. a reservation is **committed before** the provider call, and survives the worker
+  4. reservations are **committed before** the provider call, and survive the worker
      being killed mid-call;
-  5. the cost ceiling refuses a request whose *reserved upper bound* would exceed it,
+  5. the cost ceiling refuses a request whose reserved upper bound would exceed it,
      including when the served model is unknown to the price map;
-  6. **the ceiling still binds after settlement** — settle a request, then assert the
-     next one is refused because `cost_micros` counts toward the limit. A test that
-     only ever reserves would pass against a check that reads the reserved column
-     alone;
-  7. after a crash with one of two authorised calls issued, reconciliation writes
-     **exactly one** `unknown` ledger row, not two and not zero.
+  6. the ceiling **still binds after settlement** — settle, then assert the next
+     request is refused because `cost_micros` counts toward the limit. A test that
+     only ever reserves would pass against a check reading the reserved column alone;
+  7. **a guard rejection releases the generator's reservation** — quota returns, and
+     a second generation is still possible at `limit - call_cost`;
+  8. **crash in `reserved` vs crash in `started` diverge**: the first is reconciled to
+     `released` with the counter decremented, the second to `unknown` with the counter
+     unchanged and exactly one ledger row written carrying the reservation's
+     `call_kind`. One test per state — a single "crash" test cannot show the
+     distinction the design turns on.
+
 - **8e-3** — the usage view endpoints, and the reconciliation job that transitions
   stale `reserved` rows to `abandoned` with an `unknown` ledger entry.
 
