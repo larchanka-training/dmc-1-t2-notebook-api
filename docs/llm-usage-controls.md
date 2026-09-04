@@ -63,7 +63,7 @@ One row per **provider call**, not per user request. A generation writes two row
 | `reservation_id` | `uuid` | links to the reservation that authorised the call (§5) |
 | `call_kind` | `text` | `guard` \| `generator` \| `repair` |
 | `provider` | `text` | `openrouter` \| `bedrock` — the adapter that served it |
-| `model_id` | `text` | the model the provider *actually served* |
+| `model_id` | `text` NULL | the model the provider *actually served*; NULL only on an `unknown` row |
 | `status` | `text` | `ok` \| `provider_error` \| `timeout` \| `unknown` |
 | `prompt_tokens` / `completion_tokens` | `integer` | 0 when the provider omits usage |
 | `estimated_cost_micros` | `bigint` | see §6; an estimate, never a billing figure |
@@ -94,6 +94,7 @@ unit of accounting, and that unit is **one provider call**.
 | `user_id` | `uuid` FK → `users.users(id)` | |
 | `request_id` | `uuid` | groups the calls of one `/llm/generate` request |
 | `call_kind` | `text` | `guard` \| `generator` \| `repair` — known when the row is created |
+| `provider` | `text` | the adapter that will serve it, captured at reservation time |
 | `state` | `text` | `reserved` → `started` → `settled` \| `released` \| `unknown` |
 | `cost_reserved_micros` | `bigint` | this call's conservative upper bound (§6) |
 | `created_at` | `timestamptz` | |
@@ -117,9 +118,17 @@ Index on `(state, created_at)` — the reconciliation job's only query.
   reservation is released within the request. Draft 2 had no way to express this
   partial outcome, so a rejected prompt silently kept a generator call's quota.
 
-`call_kind` lives here, not only on the ledger, so a synthetic `unknown` row can state
-which call it was. The served model is genuinely unknowable in that case and is
-recorded as NULL — a guess would be worse than a gap.
+`call_kind` **and `provider`** live here, not only on the ledger, so a synthetic
+`unknown` row can be filled in without guessing. `provider` in particular cannot be
+recovered later: it comes from deployment configuration, which may have changed
+between the crash and the reconciliation run, so a reconciler reading today's config
+would attribute an old Bedrock call to OpenRouter. It is captured when the reservation
+is written.
+
+The served **model** is genuinely unknowable for an `unknown` row — the router picks
+it per request and the reply never arrived — so `llm_usage_event.model_id` is
+explicitly **nullable**, and NULL means "authorised, outcome unrecorded". A guess
+would be worse than a gap.
 
 A normal generation creates **two** rows (guard, generator) in one reserve
 transaction; each repair attempt creates one more, reserved before it runs.
@@ -270,6 +279,31 @@ both ordinary:
 A call in `started` is **never** released, including on timeout: the provider may have
 served and billed it.
 
+**Ordinary provider failures settle; they do not release.** `openrouter_client` raises
+for three real paths — timeout, connection failure, and an HTTP error status — and the
+contract must say what each does, or the implementation will invent it:
+
+| outcome | reservation | ledger `status` | counter |
+|---|---|---|---|
+| success | `started → settled` | `ok` | `calls_settled +1`; cost moved to the settled estimate |
+| HTTP error status (4xx/5xx from the provider) | `started → settled` | `provider_error` | `calls_settled +1`; **cost moved to 0** |
+| timeout | `started → settled` | `timeout` | `calls_settled +1`; cost moved to the **full reserved bound**, not 0 |
+| never sent (config error, guard rejection, refused later scope) | `reserved → released` | none | decremented |
+
+The two failure rows differ on purpose. An HTTP error status is a **reply**: the
+provider rejected the request and, for the error classes this adapter maps
+(`llm_access_denied`, `llm_internal`, `llm_throttled`, `llm_unavailable`), did not
+run a model, so the estimate is 0. A **timeout is not a reply** — the request may have
+been served and billed in full — so the conservative bound stands. Releasing on
+timeout would let a user mint quota by triggering timeouts.
+
+A connection failure before the socket is established is indistinguishable, from the
+host's side, from a request that arrived; it is treated as a timeout. The call is
+still `started`, so the conservative direction applies.
+
+Failed calls consume a provider call from the quota. That is deliberate: a retry
+storm against a failing provider is exactly what the global cap exists to stop.
+
 **Crash recovery is decidable because the states carry the distinction:**
 
 | state at crash | what it means | reconciliation |
@@ -303,8 +337,11 @@ that is already gone.
 
 The contract is therefore:
 
-1. **Two short transactions, never one long one:**
-   `reserve → COMMIT` → *provider call* → `settle → COMMIT`.
+1. **Three short transactions, never one long one:**
+   `reserve → COMMIT` → `start → COMMIT` → *provider call* → `settle → COMMIT`.
+   The middle one is not optional bookkeeping: `start` is what §5.3 reads to tell
+   "never sent" from "may have been billed", and a `start` that is not committed
+   before the request goes out records nothing.
 2. **No transaction is held open across the provider call.** It can take up to 30s;
    holding a row-locking transaction that long across the whole user base is its own
    outage.
@@ -365,6 +402,25 @@ Two different numbers, and the distinction matters:
   `output_tokens_max` is `llm_max_tokens` for the generator and repair calls; the
   guard's own cap is smaller and configured separately, since it returns a one-field
   JSON verdict rather than code.
+
+  **The repair call needs its own input term, and one prerequisite.** A repair prompt
+  is not the user's request: it carries the *previously generated code* plus the
+  *validation error*. The code side is bounded — it was model output, so at most
+  `llm_max_tokens`. The error side is **not bounded today**: `syntax_validator` returns
+  esbuild's raw `stderr`/`stdout` verbatim, which is however long esbuild decides to
+  make it. So:
+
+  ```
+  input_tokens_max(repair) = input_tokens_max(generator)
+                           + llm_max_tokens                  # the code being repaired
+                           + tokens(LLM_VALIDATION_ERROR_MAX_BYTES)
+  ```
+
+  `LLM_VALIDATION_ERROR_MAX_BYTES` does not exist yet. **8e-2 must add it and truncate
+  the validator's error text**, because without a cap on that string the repair call
+  has no computable upper bound and the ceiling is unenforceable for exactly the path
+  most likely to loop. This is a small product change, not just accounting: an
+  unbounded compiler error was already being sent to a paid model.
 
   Prices come from the configured map for a pinned model, or from a configured
   `LLM_WORST_CASE_PRICE_MICROS` when the model is chosen by the router or missing from
@@ -427,7 +483,9 @@ When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
   counter, entitlement — `users` schema, per `domain-boundaries.md`), plus repository
   and settings surface. No behaviour change.
 - **8e-2** — the reservation/settlement service, wired into the generation pipeline,
-  with the `llm_quota_exceeded` error and its OpenAPI + ui contract sync.
+  with the `llm_quota_exceeded` error and its OpenAPI + ui contract sync. Also adds
+  `LLM_VALIDATION_ERROR_MAX_BYTES` and truncates the validator error text (§6): the
+  repair call has no computable upper bound until that string is capped.
 
   Required tests, each against a **real database** — a mocked counter cannot
   demonstrate any of these:
@@ -456,7 +514,11 @@ When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
      distinction the design turns on.
 
 - **8e-3** — the usage view endpoints, and the reconciliation job that transitions
-  stale `reserved` rows to `abandoned` with an `unknown` ledger entry.
+  stale open reservations per §5.3 — `reserved` → `released` with the counter
+  decremented, `started` → `unknown` with the counter unchanged and one ledger row
+  appended. (`abandoned` was a state in an earlier draft and no longer exists;
+  turning a `reserved` row into `unknown` would charge a user for a call that was
+  never sent.)
 
 Cloud LLM stays allowlist-only until 8e-2 is deployed.
 
