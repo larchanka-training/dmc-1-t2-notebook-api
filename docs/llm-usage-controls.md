@@ -107,7 +107,8 @@ Index on `(state, created_at)` — the reconciliation job's only query.
 
 - `reserved` — authorised, **not yet sent**. If the worker dies here the call provably
   never reached the provider, so reconciliation **releases** it and the quota returns.
-- `started` — committed *immediately before* the HTTP request goes out. If the worker
+- `started` — committed *immediately before* the HTTP request goes out, and **after
+  the adapter's preflight has passed** (below). If the worker
   dies here the provider may well have served and billed it, so reconciliation closes
   it as `unknown` and the quota stays spent. Draft 2 could not tell these two apart,
   which is exactly why it could not keep its own promise.
@@ -132,6 +133,20 @@ would be worse than a gap.
 
 A normal generation creates **two** rows (guard, generator) in one reserve
 transaction; each repair attempt creates one more, reserved before it runs.
+
+**Adapters must expose a `preflight()` that runs before `reserved → started`.**
+Today the OpenRouter adapter validates its API key *inside* `converse()`, and Bedrock
+raises `LlmProviderNotConfiguredError` from its own client construction. A literal
+implementation of this contract would commit `started` first and then hit a
+configuration error — at which point §5.3 forbids releasing a `started` row, so a
+misconfigured deployment would burn the whole day's quota on requests that never left
+the process.
+
+`preflight()` performs only checks that need no network: key present, model id
+non-blank, adapter constructible. It raises `LlmProviderNotConfiguredError`, which is
+the **one typed outcome that proves inference never began** and is therefore the only
+path allowed to release a reservation after it was taken. 8e-2 moves the existing
+in-`converse()` key check into it.
 
 ### 4.3 `users.llm_usage_counter` — the enforcement state
 
@@ -177,7 +192,9 @@ them; under concurrency both requests read `n < cap` and both proceed.
 
 ### 5.1 Reserve
 
-One statement per scope, inside the request transaction:
+One statement per **counter row** — that is, per `(scope, window_kind)` pair, so four
+in total for a normal reservation — inside the request transaction, acquired in the
+lock order below:
 
 ```sql
 INSERT INTO users.llm_usage_counter AS c
@@ -279,27 +296,39 @@ both ordinary:
 A call in `started` is **never** released, including on timeout: the provider may have
 served and billed it.
 
-**Ordinary provider failures settle; they do not release.** `openrouter_client` raises
-for three real paths — timeout, connection failure, and an HTTP error status — and the
-contract must say what each does, or the implementation will invent it:
+**Ordinary provider failures settle; they do not release.** The adapter raises on
+several real paths, and the contract must say what each does or the implementation
+will invent it. The governing rule is one sentence:
 
-| outcome | reservation | ledger `status` | counter |
+> **A `started` call keeps its full reserved bound unless a typed outcome proves
+> inference never began.**
+
+Cost `0` is not the default for failure — it is a claim, and it needs evidence.
+
+| outcome | reservation | ledger `status` | cost effect |
 |---|---|---|---|
-| success | `started → settled` | `ok` | `calls_settled +1`; cost moved to the settled estimate |
-| HTTP error status (4xx/5xx from the provider) | `started → settled` | `provider_error` | `calls_settled +1`; **cost moved to 0** |
-| timeout | `started → settled` | `timeout` | `calls_settled +1`; cost moved to the **full reserved bound**, not 0 |
-| never sent (config error, guard rejection, refused later scope) | `reserved → released` | none | decremented |
+| success with usage data | `started → settled` | `ok` | replaced by the settled estimate |
+| success, but the body is unusable (invalid JSON, no `choices`, empty text) | `started → settled` | `provider_error` | **full bound kept** |
+| HTTP error status | `started → settled` | `provider_error` | **full bound kept** |
+| timeout / connection failure | `started → settled` | `timeout` | **full bound kept** |
+| refused by preflight, before `started` | `reserved → released` | none | bound returned in full |
 
-The two failure rows differ on purpose. An HTTP error status is a **reply**: the
-provider rejected the request and, for the error classes this adapter maps
-(`llm_access_denied`, `llm_internal`, `llm_throttled`, `llm_unavailable`), did not
-run a model, so the estimate is 0. A **timeout is not a reply** — the request may have
-been served and billed in full — so the conservative bound stands. Releasing on
-timeout would let a user mint quota by triggering timeouts.
+**Corrected after review — the previous version was unsafe.** It treated any HTTP
+4xx/5xx as proof that no model ran and zeroed the cost. That is not sound: OpenRouter
+distinguishes errors raised *before* a provider is tried from `5xx` returned *after*
+one or more provider attempts, and the status code alone does not tell them apart.
+A model can therefore have run and been billed behind a `5xx`. Zeroing there would
+let a failing provider quietly drain the budget while the ceiling reported room.
 
-A connection failure before the socket is established is indistinguishable, from the
-host's side, from a request that arrived; it is treated as a timeout. The call is
-still `started`, so the conservative direction applies.
+The same reasoning covers a case the earlier matrix omitted entirely: a **200 with an
+unusable body**. `_parse_completion_response` raises on invalid JSON, missing
+`choices`, or empty text — the request unquestionably reached the model, so it is a
+settled `provider_error` that keeps its bound, not a release.
+
+Refining any of these later requires *evidence*, not a status code: if the provider
+exposes trustworthy per-attempt usage metadata, a future revision may zero the cost
+for outcomes that metadata proves never reached a model. Until then the conservative
+value stands, because the ceiling is the thing being protected.
 
 Failed calls consume a provider call from the quota. That is deliberate: a retry
 storm against a failing provider is exactly what the global cap exists to stop.
@@ -308,8 +337,27 @@ storm against a failing provider is exactly what the global cap exists to stop.
 
 | state at crash | what it means | reconciliation |
 |---|---|---|
-| `reserved` | request never sent | close as `released`, decrement the counter |
+| `reserved` | request never sent | close as `released`; see the release statement below |
 | `started` | may have been served and billed | close as `unknown`, counter unchanged, append one ledger row with `status = 'unknown'`, `call_kind` from the reservation, `model_id` NULL |
+
+**Release returns both columns, on all four rows.** "Decrement the counter" was
+ambiguous and would have been implemented as `calls_reserved - 1` alone, which returns
+the call quota and leaves the cost quota consumed **forever** — a slow leak that ends
+with a window permanently at its ceiling and no calls to show for it. The release is
+one conditional transaction over the same four rows, in the same lock order:
+
+```sql
+UPDATE users.llm_usage_counter AS c
+   SET calls_reserved       = c.calls_reserved - 1,
+       cost_reserved_micros = c.cost_reserved_micros - :this_reservation_bound
+ WHERE (c.scope, c.scope_key, c.window_kind, c.window_start) = (...)
+```
+
+paired with `UPDATE ... SET state = 'released' WHERE id = :id AND state = 'reserved'`
+in the same transaction, so a concurrent reconciliation cannot release the same row
+twice. `:this_reservation_bound` is the row's own `cost_reserved_micros`, not a
+recomputed estimate — recomputing could subtract a different number than was added if
+config changed in between.
 
 The job selects reservations older than a threshold in either open state. It must
 never simply decrement a `started` row, or crashing becomes a way to mint quota; and
@@ -403,24 +451,28 @@ Two different numbers, and the distinction matters:
   guard's own cap is smaller and configured separately, since it returns a one-field
   JSON verdict rather than code.
 
-  **The repair call needs its own input term, and one prerequisite.** A repair prompt
-  is not the user's request: it carries the *previously generated code* plus the
-  *validation error*. The code side is bounded — it was model output, so at most
-  `llm_max_tokens`. The error side is **not bounded today**: `syntax_validator` returns
-  esbuild's raw `stderr`/`stdout` verbatim, which is however long esbuild decides to
-  make it. So:
+  **The repair call is bounded from its actual prompt, not from a proxy.** A repair
+  prompt carries the previously generated code and the validation error, and *both are
+  already in hand when the repair reservation is taken* — the generation finished and
+  the validator ran. So there is no reason to estimate:
 
   ```
-  input_tokens_max(repair) = input_tokens_max(generator)
-                           + llm_max_tokens                  # the code being repaired
-                           + tokens(LLM_VALIDATION_ERROR_MAX_BYTES)
+  input_tokens_max(repair) = tokens(utf8_len(built repair prompt)
+                                    + system-prompt allowance for repair)
   ```
 
-  `LLM_VALIDATION_ERROR_MAX_BYTES` does not exist yet. **8e-2 must add it and truncate
-  the validator's error text**, because without a cap on that string the repair call
-  has no computable upper bound and the ceiling is unenforceable for exactly the path
-  most likely to loop. This is a small product change, not just accounting: an
-  unbounded compiler error was already being sent to a paid model.
+  The previous draft used `llm_max_tokens` as a stand-in for the prior completion's
+  size. That is a **proxy, not a bound**: with a router-selected model the tokenizer is
+  not ours, so a token count from one model's cap says nothing reliable about another
+  model's billing. Measuring the bytes actually about to be sent removes the guess.
+
+  This is only computable once the validator's error text is capped.
+  `LLM_VALIDATION_ERROR_MAX_BYTES` does not exist yet: `syntax_validator` returns
+  esbuild's raw `stderr`/`stdout` verbatim, bounded by nothing. **8e-2 must add the
+  cap and truncate that text** — without it the repair prompt has no maximum size, so
+  the ceiling is unenforceable on exactly the path most likely to loop. It is a
+  product fix in its own right: an unbounded compiler error is already being sent to a
+  paid model.
 
   Prices come from the configured map for a pinned model, or from a configured
   `LLM_WORST_CASE_PRICE_MICROS` when the model is chosen by the router or missing from
@@ -508,10 +560,27 @@ When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
   7. **a guard rejection releases the generator's reservation** — quota returns, and
      a second generation is still possible at `limit - call_cost`;
   8. **crash in `reserved` vs crash in `started` diverge**: the first is reconciled to
-     `released` with the counter decremented, the second to `unknown` with the counter
-     unchanged and exactly one ledger row written carrying the reservation's
+     `released` with both counter columns returned, the second to `unknown` with the
+     counter unchanged and exactly one ledger row written carrying the reservation's
      `call_kind`. One test per state — a single "crash" test cannot show the
-     distinction the design turns on.
+     distinction the design turns on;
+  9. **release returns BOTH columns.** Reserve, release, then assert
+     `cost_reserved_micros` is back to its previous value — not just `calls_reserved`.
+     A test that checks only the call count passes while the cost quota leaks away
+     permanently;
+  10. **every failure path keeps its bound.** One case each for HTTP error status,
+      timeout, connection failure, and a `200` whose body is unusable (invalid JSON /
+      no `choices` / empty text): the reservation settles, the ledger records the
+      status, and the window's cost does **not** drop. The `200`-with-bad-body case
+      matters most — it is the one an implementer is most likely to route into the
+      release path by mistake;
+  11. **preflight ordering.** With an adapter whose `preflight()` fails, assert the
+      reservation ends `released` and never reaches `started`. If `started` were
+      committed first, §5.3 would forbid releasing it and a misconfigured deployment
+      would burn the day's quota on requests that never left the process;
+  12. **`LLM_VALIDATION_ERROR_MAX_BYTES` truncates.** A validator error longer than
+      the cap is truncated before it reaches the repair prompt, and the reserved bound
+      is computed from the truncated prompt.
 
 - **8e-3** — the usage view endpoints, and the reconciliation job that transitions
   stale open reservations per §5.3 — `reserved` → `released` with the counter
