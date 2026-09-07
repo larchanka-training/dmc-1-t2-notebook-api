@@ -77,7 +77,7 @@ job to write one that the schema did not define.
 Indexes: `(user_id, created_at)` for the usage view, `(request_id)` for tracing.
 
 The ledger is **append-only**. It is evidence, not state: quota decisions read the
-counters in §4.2, never `SUM()` over this table. A sum over an unbounded table is
+counters in §4.3, never `SUM()` over this table. A sum over an unbounded table is
 both slow and racy.
 
 ### 4.2 `users.llm_usage_reservation` — one durable row per planned provider call
@@ -655,7 +655,7 @@ When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
       release the same `reserved` row (e.g. guard abort racing with reconciliation)
       resolve through the atomic gate, resulting in exactly one state change and
       exactly one counter deduction across all four rows;
-  11. **inactive limit dimensions across all four scopes**: executes reservations across
+  11. **inactive limit dimensions across all four scope/window pairs**: executes reservations across
       all four `(scope, window_kind)` rows where only one dimension is configured and the
       other is inactive (`NULL`) (e.g. user/day and user/month call limits with
       `:cost_limit_micros = NULL`, global/day call limit with `:cost_limit_micros = NULL`,
