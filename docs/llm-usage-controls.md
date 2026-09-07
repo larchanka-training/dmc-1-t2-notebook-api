@@ -63,7 +63,7 @@ One row per **provider call**, not per user request. A generation writes two row
 | `reservation_id` | `uuid` | links to the reservation that authorised the call (§5) |
 | `call_kind` | `text` | `guard` \| `generator` \| `repair` |
 | `provider` | `text` | `openrouter` \| `bedrock` — the adapter that served it |
-| `model_id` | `text` NULL | the model the provider *actually served*; NULL only on an `unknown` row |
+| `model_id` | `text` NULL | the model the provider *actually served*; NULL on `unknown` rows and on timeout / transport / provider errors where no served model was returned |
 | `status` | `text` | `ok` \| `provider_error` \| `timeout` \| `unknown` |
 | `prompt_tokens` / `completion_tokens` | `integer` | 0 when the provider omits usage |
 | `estimated_cost_micros` | `bigint` | see §6; an estimate, never a billing figure |
@@ -114,10 +114,13 @@ Index on `(state, created_at)` — the reconciliation job's only query.
   which is exactly why it could not keep its own promise.
 - `settled` — the call returned and its ledger row was written in the same
   transaction.
-- `released` — the call is known not to happen. The ordinary case is a **guard
-  rejection**: the prompt is refused, so the generator call will never be made and its
-  reservation is released within the request. Draft 2 had no way to express this
-  partial outcome, so a rejected prompt silently kept a generator call's quota.
+- `released` — the call is known not to happen. Ordinary cases are **guard
+  rejection** (the prompt is refused) and **request abort** (guard preflight failure,
+  HTTP/transport/timeout failure, unusable provider response, or invalid guard JSON):
+  in all these paths the generator call will never be made, and its pre-reserved row
+  is deterministically released within the request lifecycle (§5.3). Draft 2 had no
+  way to express partial outcome cleanup, so an aborted or rejected guard silently
+  kept a generator call's quota until reconciliation.
 
 `call_kind` **and `provider`** live here, not only on the ledger, so a synthetic
 `unknown` row can be filled in without guessing. `provider` in particular cannot be
@@ -126,10 +129,12 @@ between the crash and the reconciliation run, so a reconciler reading today's co
 would attribute an old Bedrock call to OpenRouter. It is captured when the reservation
 is written.
 
-The served **model** is genuinely unknowable for an `unknown` row — the router picks
-it per request and the reply never arrived — so `llm_usage_event.model_id` is
-explicitly **nullable**, and NULL means "authorised, outcome unrecorded". A guess
-would be worse than a gap.
+The served **model** is genuinely unknowable whenever the provider reply never
+arrives or fails before returning completion metadata — the router picks the model per
+request — so `llm_usage_event.model_id` is explicitly **nullable**. NULL means
+"authorised, served model unrecorded or unobserved" (covering both synthetic `unknown`
+rows written by reconciliation and settled `timeout` / transport / early provider error
+rows where no served model was received). A guess would be worse than a gap.
 
 A normal generation creates **two** rows (guard, generator) in one reserve
 transaction; each repair attempt creates one more, reserved before it runs.
@@ -243,9 +248,11 @@ its own `cost_reserved_micros` (§6) so `:cost_micros` is their sum. The counter
 enforcement state; the rows are what recovery and partial release act on. A guard
 rejection later releases the generator's row and decrements the counter by 1 — which
 is expressible only because the rows are per call. Repair retries are
-reserved individually, before each retry, and a refused reservation ends the repair
-loop rather than failing the request (the unrepaired result is returned as it would
-be on exhausted retries).
+reserved individually, before each retry. If a repair reservation is refused due to
+quota exhaustion, the repair loop halts immediately and raises `CodeValidationError`
+("Generated code did not pass syntax validation") — preserving the exact existing
+behavior of `generation_service.py` when repair attempts cannot proceed. An
+unvalidated result must never be returned to the client as validated code.
 
 A reservation touches up to **four** counter rows — two scopes × two windows — so
 "global before user" is not a total order and does not prevent deadlock on its own.
@@ -286,10 +293,13 @@ the ledger must never do.
 A reservation is **released** only when its call provably will not happen. Two cases,
 both ordinary:
 
-- **guard rejection** — the guard refuses the prompt, so the generator call will never
-  be made; its `reserved` row is released and the counter decremented within the
-  request. Without this, every rejected prompt would permanently consume a
-  generator's worth of quota;
+- **downstream cleanup on guard rejection or request abort** — if the guard refuses the
+  prompt or exits the pipeline due to preflight failure, transport/HTTP failure, timeout,
+  unusable provider output, or invalid guard JSON, the generator call will never be
+  made. The pipeline MUST immediately release all downstream reservations for that
+  `request_id` that are still in `reserved` state using the atomic release protocol
+  below, returning their call and cost capacity immediately. Without this, every guard
+  failure would lock up a generator call's quota until background reconciliation;
 - a later scope's check fails during reservation (§5.1), which is a rollback of an
   uncommitted transaction rather than a compensation.
 
@@ -307,11 +317,22 @@ Cost `0` is not the default for failure — it is a claim, and it needs evidence
 
 | outcome | reservation | ledger `status` | cost effect |
 |---|---|---|---|
-| success with usage data | `started → settled` | `ok` | replaced by the settled estimate |
+| success with complete, valid usage data | `started → settled` | `ok` | replaced by the settled estimate |
+| success with missing or partial usage data | `started → settled` | `ok` | **full bound kept** |
 | success, but the body is unusable (invalid JSON, no `choices`, empty text) | `started → settled` | `provider_error` | **full bound kept** |
 | HTTP error status | `started → settled` | `provider_error` | **full bound kept** |
 | timeout / connection failure | `started → settled` | `timeout` | **full bound kept** |
 | refused by preflight, before `started` | `reserved → released` | none | bound returned in full |
+
+**Successful responses without complete usage keep their full bound.** The event
+schema permits missing provider usage by storing zero token counts (§4.1), and both
+adapters normalize missing usage to zero (`openrouter_client.py:265-273`,
+`bedrock_client.py:183-188`). If a provider returns 200 OK with valid text but omits
+or truncates usage metadata, replacing the reserved bound with a zero estimate would
+settle a real inference for free and reopen the cost ceiling. The governing rule
+applies: replace the bound only when all token usage fields required by the configured
+pricing formula are present and positive; otherwise settle `ok` while retaining the
+full reserved bound (`estimated_cost_micros = cost_reserved_micros`).
 
 **Corrected after review — the previous version was unsafe.** It treated any HTTP
 4xx/5xx as proof that no model ran and zeroed the cost. That is not sound: OpenRouter
@@ -340,24 +361,47 @@ storm against a failing provider is exactly what the global cap exists to stop.
 | `reserved` | request never sent | close as `released`; see the release statement below |
 | `started` | may have been served and billed | close as `unknown`, counter unchanged, append one ledger row with `status = 'unknown'`, `call_kind` from the reservation, `model_id` NULL |
 
-**Release returns both columns, on all four rows.** "Decrement the counter" was
-ambiguous and would have been implemented as `calls_reserved - 1` alone, which returns
-the call quota and leaves the cost quota consumed **forever** — a slow leak that ends
-with a window permanently at its ceiling and no calls to show for it. The release is
-one conditional transaction over the same four rows, in the same lock order:
+**Release is atomic and idempotent under concurrency: state transition gates counters.**
+Simply putting counter decrements and a conditional reservation update in the same
+transaction is not enough under concurrency: if two workers race to release the same
+reservation (for example, an in-request guard abort racing against a background
+reconciliation job), both could execute counter decrements before the state check runs,
+double-decrementing the counters.
 
-```sql
-UPDATE users.llm_usage_counter AS c
-   SET calls_reserved       = c.calls_reserved - 1,
-       cost_reserved_micros = c.cost_reserved_micros - :this_reservation_bound
- WHERE (c.scope, c.scope_key, c.window_kind, c.window_start) = (...)
-```
+The state transition on `users.llm_usage_reservation` must therefore be the atomic gate
+that authorizes counter mutation:
 
-paired with `UPDATE ... SET state = 'released' WHERE id = :id AND state = 'reserved'`
-in the same transaction, so a concurrent reconciliation cannot release the same row
-twice. `:this_reservation_bound` is the row's own `cost_reserved_micros`, not a
-recomputed estimate — recomputing could subtract a different number than was added if
-config changed in between.
+1. **Step 1: Atomic state claim.**
+   ```sql
+   UPDATE users.llm_usage_reservation
+      SET state = 'released',
+          closed_at = now()
+    WHERE id = :id
+      AND state = 'reserved'
+   RETURNING cost_reserved_micros;
+   ```
+   If this query updates **0 rows**, the reservation was already closed or transitioned;
+   the releaser terminates immediately without modifying any counter.
+
+2. **Step 2: Counter decrements (only if Step 1 returned a row).**
+   Using the exact `cost_reserved_micros` returned from Step 1 (not a recomputed
+   estimate, which could diverge if configuration changed), the worker decrements the
+   four counter rows, acquired in the mandatory canonical lock order:
+   `global/day → global/month → user/day → user/month`:
+
+   ```sql
+   UPDATE users.llm_usage_counter AS c
+      SET calls_reserved       = c.calls_reserved - 1,
+          cost_reserved_micros = c.cost_reserved_micros - :returned_bound
+    WHERE (c.scope, c.scope_key, c.window_kind, c.window_start) = (...)
+   ```
+
+   (In PostgreSQL this can also be expressed as a single CTE where counter mutations
+   are joined directly to the `RETURNING` of the claimed reservation).
+
+Because the reservation transition is claimed first with `RETURNING`, concurrent
+releasers cannot double-decrement counters, and both `calls_reserved` and
+`cost_reserved_micros` are returned accurately on all four rows.
 
 The job selects reservations older than a threshold in either open state. It must
 never simply decrement a `started` row, or crashing becomes a way to mint quota; and
@@ -481,8 +525,12 @@ Two different numbers, and the distinction matters:
 - **`estimated_cost_micros` — the settled estimate**, computed from the actual token
   usage the provider reported. This is the number the usage view shows.
 
-At settle time the reservation's upper bound is released and replaced by the settled
-estimate, so the window's reserved total converges downward rather than drifting up.
+At settle time, if and only if the provider returned complete, valid usage data needed
+by the configured price formula, the reservation's upper bound is released and replaced
+by the settled estimate. If usage data is absent or partial, the settled estimate
+retains the full reserved bound (`estimated_cost_micros = cost_reserved_micros`),
+ensuring the window's reserved total converges downward when metered, but never
+silently clears unmetered spending.
 
 Neither number is a billing figure and neither may be presented as money owed:
 provider pricing changes without a deployment, and the free router picks the model
@@ -539,55 +587,79 @@ When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
   `LLM_VALIDATION_ERROR_MAX_BYTES` and truncates the validator error text (§6): the
   repair call has no computable upper bound until that string is capped.
 
-  Required tests, each against a **real database** — a mocked counter cannot
-  demonstrate any of these:
+  Required test suite:
 
-  1. two simultaneous generations, with the counter pre-set to
+  **A. PostgreSQL concurrency & invariant suite (real database required — a mocked counter cannot demonstrate these):**
+
+  1. **two simultaneous generations**, with the counter pre-set to
      **`limit - call_cost`** (not `limit - 1`), ⇒ exactly one succeeds. The unit
      matters: a generation reserves **two** provider calls, so at `limit - 1`
      *neither* request can pass and the test would prove nothing while looking green;
-  2. the first request of a window is refused when its cost exceeds the limit,
-     starting from an **empty table** so the `INSERT` path is exercised — a test that
-     pre-seeds the counter row would pass against an unguarded insert;
-  3. settlement is idempotent — settling twice counts once;
-  4. reservations are **committed before** the provider call, and survive the worker
-     being killed mid-call;
-  5. the cost ceiling refuses a request whose reserved upper bound would exceed it,
-     including when the served model is unknown to the price map;
-  6. the ceiling **still binds after settlement** — settle, then assert the next
-     request is refused because `cost_micros` counts toward the limit. A test that
-     only ever reserves would pass against a check reading the reserved column alone;
-  7. **a guard rejection releases the generator's reservation** — quota returns, and
-     a second generation is still possible at `limit - call_cost`;
-  8. **crash in `reserved` vs crash in `started` diverge**: the first is reconciled to
-     `released` with both counter columns returned, the second to `unknown` with the
-     counter unchanged and exactly one ledger row written carrying the reservation's
-     `call_kind`. One test per state — a single "crash" test cannot show the
-     distinction the design turns on;
-  9. **release returns BOTH columns.** Reserve, release, then assert
+  2. **first request on empty table**: the first request of a window is refused when
+     its cost exceeds the limit, starting from an **empty table** so the `INSERT` path
+     is exercised — a test that pre-seeds the counter row would pass against an
+     unguarded insert;
+  3. **settlement is idempotent** — settling twice counts once;
+  4. **pre-call reservation persistence**: reservations are **committed before** the
+     provider call, and survive the worker being killed mid-call;
+  5. **cost ceiling enforcement**: refuses a request whose reserved upper bound would
+     exceed the limit, including when the served model is unknown to the price map;
+  6. **ceiling binds after settlement**: settle, then assert the next request is
+     refused because `cost_micros` counts toward the limit. A test that only ever
+     reserves would pass against a check reading the reserved column alone;
+  7. **downstream cleanup by lifecycle point**:
+     - **guard preflight failure**: neither call reaches `started`; both reservations are
+       released, returning all quota and bounds — starting at `limit - call_cost`
+       (where `call_cost = 2`), a second complete generation remains possible;
+     - **post-start guard outcomes (rejection, timeout, HTTP error, unusable response)**: the
+       guard was attempted and consumes 1 call (settles `ok`, `provider_error`, or
+       `timeout`), while the downstream generator's reservation is deterministically
+       released (`calls_reserved - 1` and its bound returned). Assert that exactly
+       1 call remains consumed and 1 returned: at `limit - 2`, the counter sits at
+       `limit - 1` so a second two-call generation is refused; seeded at `limit - 3`,
+       a second generation succeeds;
+  8. **release returns BOTH columns**: reserve, release, then assert
      `cost_reserved_micros` is back to its previous value — not just `calls_reserved`.
      A test that checks only the call count passes while the cost quota leaks away
      permanently;
-  10. **every failure path keeps its bound.** One case each for HTTP error status,
-      timeout, connection failure, and a `200` whose body is unusable (invalid JSON /
-      no `choices` / empty text): the reservation settles, the ledger records the
-      status, and the window's cost does **not** drop. The `200`-with-bad-body case
-      matters most — it is the one an implementer is most likely to route into the
-      release path by mistake;
-  11. **preflight ordering.** With an adapter whose `preflight()` fails, assert the
+  9. **failure paths and partial-usage completions keep full bound**: one case each for
+     HTTP error status, timeout, connection failure, a `200` whose body is unusable
+     (invalid JSON / no `choices` / empty text), and a `200` whose usage data is
+     missing or partial: the reservation settles, the ledger records the status, and
+     the window's cost does **not** drop; assert `model_id = NULL` on the ledger row
+     for timeout and connection failure where no served model was observable;
+  10. **concurrent release idempotency**: two simultaneous releasers attempting to
+      release the same `reserved` row (e.g. guard abort racing with reconciliation)
+      resolve through the atomic gate, resulting in exactly one state change and
+      exactly one counter deduction across all four rows.
+
+  **B. Unit & adapter suite (focused checks, no database required):**
+
+  11. **preflight ordering**: with an adapter whose `preflight()` fails, assert the
       reservation ends `released` and never reaches `started`. If `started` were
       committed first, §5.3 would forbid releasing it and a misconfigured deployment
       would burn the day's quota on requests that never left the process;
-  12. **`LLM_VALIDATION_ERROR_MAX_BYTES` truncates.** A validator error longer than
+  12. **`LLM_VALIDATION_ERROR_MAX_BYTES` truncates**: a validator error longer than
       the cap is truncated before it reaches the repair prompt, and the reserved bound
       is computed from the truncated prompt.
 
 - **8e-3** — the usage view endpoints, and the reconciliation job that transitions
-  stale open reservations per §5.3 — `reserved` → `released` with the counter
-  decremented, `started` → `unknown` with the counter unchanged and one ledger row
-  appended. (`abandoned` was a state in an earlier draft and no longer exists;
-  turning a `reserved` row into `unknown` would charge a user for a call that was
-  never sent.)
+  stale open reservations per §5.3 — `reserved` → `released` with both call and cost
+  counter columns returned, `started` → `unknown` with the counter unchanged and one
+  ledger row appended. (`abandoned` was a state in an earlier draft and no longer
+  exists; turning a `reserved` row into `unknown` would charge a user for a call that
+  was never sent.)
+
+  Required database tests for 8e-3:
+  1. **stale `reserved` reconciliation**: stale `reserved` row transitions to
+     `released`, returning both `calls_reserved` and `cost_reserved_micros` on all
+     four counter rows;
+  2. **stale `started` reconciliation**: stale `started` row transitions to
+     `unknown`, counter unchanged, appending exactly one ledger row with
+     `status = 'unknown'`, `call_kind` preserved, and `model_id` NULL;
+  3. **reconciliation vs late settlement race**: a reservation settling while
+     reconciliation inspects it resolves deterministically without double-counting
+     or double-releasing.
 
 Cloud LLM stays allowlist-only until 8e-2 is deployed.
 
