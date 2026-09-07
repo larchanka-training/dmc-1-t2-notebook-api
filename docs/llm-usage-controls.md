@@ -155,18 +155,25 @@ in-`converse()` key check into it.
 
 ### 4.3 `users.llm_usage_counter` — the enforcement state
 
-| column | type | note |
-|---|---|---|
-| `scope` | `text` | `user` \| `global` |
-| `scope_key` | `text` | the user id, or `'-'` for global |
-| `window_kind` | `text` | `day` \| `month` |
-| `window_start` | `date` | UTC window boundary |
-| `calls_reserved` | `integer` | incremented **before** the provider call |
-| `calls_settled` | `integer` | incremented after it returns |
-| `cost_reserved_micros` | `bigint` | conservative upper bound, reserved before the call (§6) |
-| `cost_micros` | `bigint` | settled estimate (§6) |
+| column | type | constraints | note |
+|---|---|---|---|
+| `scope` | `text` | NOT NULL | `user` \| `global` |
+| `scope_key` | `text` | NOT NULL | the user id, or `'-'` for global |
+| `window_kind` | `text` | NOT NULL | `day` \| `month` |
+| `window_start` | `date` | NOT NULL | UTC window boundary |
+| `calls_reserved` | `integer` | NOT NULL DEFAULT 0 CHECK (calls_reserved >= 0) | incremented **before** the provider call |
+| `calls_settled` | `integer` | NOT NULL DEFAULT 0 CHECK (calls_settled >= 0) | incremented after it returns |
+| `cost_reserved_micros` | `bigint` | NOT NULL DEFAULT 0 CHECK (cost_reserved_micros >= 0) | conservative upper bound, reserved before the call (§6) |
+| `cost_micros` | `bigint` | NOT NULL DEFAULT 0 CHECK (cost_micros >= 0) | settled estimate (§6) |
 
 Primary key `(scope, scope_key, window_kind, window_start)`.
+
+All four aggregate counter columns are `NOT NULL DEFAULT 0` with non-negative check
+constraints. An empty window starts with all counters at zero. The reservation `INSERT`
+explicitly populates `calls_settled = 0` and `cost_micros = 0` (matching the DDL
+defaults), guaranteeing that arithmetic expressions like
+`c.cost_micros + c.cost_reserved_micros + :cost_micros` never evaluate to `NULL` on
+subsequent operations.
 
 `calls_reserved` is the number enforcement compares against. `calls_settled` exists
 only for reconciliation and reporting — a gap between the two is the count of calls
@@ -204,23 +211,34 @@ lock order below:
 ```sql
 INSERT INTO users.llm_usage_counter AS c
        (scope, scope_key, window_kind, window_start,
-        calls_reserved, cost_reserved_micros)
-SELECT :scope, :key, :window_kind, :window_start, :cost, :cost_micros
- WHERE :cost <= :call_limit                 -- guards the INSERT path
-   AND :cost_micros <= :cost_limit_micros
+        calls_reserved, calls_settled, cost_reserved_micros, cost_micros)
+SELECT :scope, :key, :window_kind, :window_start, :cost, 0, :cost_micros, 0
+ WHERE (:call_limit IS NULL OR :cost <= :call_limit)                 -- guards the INSERT path
+   AND (:cost_limit_micros IS NULL OR :cost_micros <= :cost_limit_micros)
 ON CONFLICT (scope, scope_key, window_kind, window_start) DO UPDATE
    SET calls_reserved       = c.calls_reserved + :cost,
        cost_reserved_micros = c.cost_reserved_micros + :cost_micros
- WHERE c.calls_reserved + :cost <= :call_limit          -- guards the UPDATE path
+ WHERE (:call_limit IS NULL OR c.calls_reserved + :cost <= :call_limit)          -- guards the UPDATE path
    -- BOTH cost columns: `cost_micros` is money already spent and settled, and
    -- omitting it made the ceiling reset itself on every settlement (see below).
-   AND c.cost_micros + c.cost_reserved_micros + :cost_micros <= :cost_limit_micros
+   AND (:cost_limit_micros IS NULL OR c.cost_micros + c.cost_reserved_micros + :cost_micros <= :cost_limit_micros)
 RETURNING calls_reserved;
 ```
 
 No row returned ⇒ a cap would be exceeded ⇒ reject with `429 llm_quota_exceeded`
 (§8). The check and the increment are the same statement, so there is no window to
 race in.
+
+**Inactive limit dimensions (`NULL` semantics):** Each counter row represents a
+specific `(scope, window_kind)` pair. As defined in §7, different scopes and windows
+enforce different dimensions (e.g. user/day and user/month enforce call counts but no
+cost ceiling; global/month enforces a cost ceiling but no call count limit). An
+unconstrained or inactive dimension is represented explicitly as `NULL`
+(`:call_limit = NULL` or `:cost_limit_micros = NULL`). The reservation predicate uses
+`(:call_limit IS NULL OR ...)` and `(:cost_limit_micros IS NULL OR ...)`. When a limit
+parameter is `NULL`, that dimension is unconstrained and passes unconditionally. This
+avoids SQL three-valued logic failures (where `x <= NULL` yields `unknown` and rejects
+valid calls) without relying on undocumented magic sentinel values.
 
 **The cost check must span both columns.** At settlement a reservation's upper bound
 moves out of `cost_reserved_micros` and the actual estimate lands in `cost_micros`
@@ -595,10 +613,15 @@ When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
      **`limit - call_cost`** (not `limit - 1`), ⇒ exactly one succeeds. The unit
      matters: a generation reserves **two** provider calls, so at `limit - 1`
      *neither* request can pass and the test would prove nothing while looking green;
-  2. **first request on empty table**: the first request of a window is refused when
-     its cost exceeds the limit, starting from an **empty table** so the `INSERT` path
-     is exercised — a test that pre-seeds the counter row would pass against an
-     unguarded insert;
+  2. **first request on empty table and initialized arithmetic**:
+     - the first request of a window is refused when its cost exceeds the limit,
+       starting from an **empty table** so the conditional `INSERT` path is
+       exercised — a test that pre-seeds the counter row would pass against an
+       unguarded insert;
+     - starting from an empty table, a valid first request is admitted, zero-initializing
+       `calls_settled` and `cost_micros`; settling and then reserving a second request
+       proves that subsequent arithmetic (`c.cost_micros + c.cost_reserved_micros + :cost_micros`)
+       evaluates correctly against initialized non-null values without failing or rejecting;
   3. **settlement is idempotent** — settling twice counts once;
   4. **pre-call reservation persistence**: reservations are **committed before** the
      provider call, and survive the worker being killed mid-call;
@@ -631,15 +654,22 @@ When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
   10. **concurrent release idempotency**: two simultaneous releasers attempting to
       release the same `reserved` row (e.g. guard abort racing with reconciliation)
       resolve through the atomic gate, resulting in exactly one state change and
-      exactly one counter deduction across all four rows.
+      exactly one counter deduction across all four rows;
+  11. **inactive limit dimensions across all four scopes**: executes reservations across
+      all four `(scope, window_kind)` rows where only one dimension is configured and the
+      other is inactive (`NULL`) (e.g. user/day and user/month call limits with
+      `:cost_limit_micros = NULL`, global/day call limit with `:cost_limit_micros = NULL`,
+      and global/month cost ceiling with `:call_limit = NULL`), proving that `NULL`
+      unconstrained dimensions admit valid requests and do not reject due to SQL
+      three-valued logic.
 
   **B. Unit & adapter suite (focused checks, no database required):**
 
-  11. **preflight ordering**: with an adapter whose `preflight()` fails, assert the
+  12. **preflight ordering**: with an adapter whose `preflight()` fails, assert the
       reservation ends `released` and never reaches `started`. If `started` were
       committed first, §5.3 would forbid releasing it and a misconfigured deployment
       would burn the day's quota on requests that never left the process;
-  12. **`LLM_VALIDATION_ERROR_MAX_BYTES` truncates**: a validator error longer than
+  13. **`LLM_VALIDATION_ERROR_MAX_BYTES` truncates**: a validator error longer than
       the cap is truncated before it reaches the repair prompt, and the reserved bound
       is computed from the truncated prompt.
 
