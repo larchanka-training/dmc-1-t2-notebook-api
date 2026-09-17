@@ -3,7 +3,7 @@
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text, update
+from sqlalchemy import inspect, select, text, update
 from sqlalchemy.orm import Session
 
 from app.modules.llm.models import (
@@ -27,7 +27,7 @@ class LlmUsageRepository:
 
     def get_entitlement(self, user_id: UUID) -> LlmEntitlement | None:
         """Fetch entitlement record for a specific user."""
-        return self.db.get(LlmEntitlement, user_id)
+        return self.db.get(LlmEntitlement, user_id, populate_existing=True)
 
     def upsert_entitlement(
         self,
@@ -66,6 +66,15 @@ class LlmUsageRepository:
     # Reservations
     # -------------------------------------------------------------------------
 
+    def _refresh_loaded_reservation(self, reservation_id: UUID) -> None:
+        """Refresh an already-loaded reservation object in the session identity map."""
+        key = inspect(LlmUsageReservation).identity_key_from_primary_key(
+            (reservation_id,)
+        )
+        obj = self.db.identity_map.get(key)
+        if obj is not None:
+            self.db.refresh(obj)
+
     def create_reservation(
         self,
         *,
@@ -94,7 +103,7 @@ class LlmUsageRepository:
 
     def get_reservation_by_id(self, reservation_id: UUID) -> LlmUsageReservation | None:
         """Fetch a reservation by primary key."""
-        return self.db.get(LlmUsageReservation, reservation_id)
+        return self.db.get(LlmUsageReservation, reservation_id, populate_existing=True)
 
     def get_reservations_by_request_id(
         self, request_id: UUID
@@ -122,7 +131,10 @@ class LlmUsageRepository:
         )
         result = self.db.execute(statement)
         self.db.flush()
-        return (result.rowcount or 0) > 0
+        updated = (result.rowcount or 0) > 0
+        if updated:
+            self._refresh_loaded_reservation(reservation_id)
+        return updated
 
     def transition_reservation_to_settled(
         self, reservation_id: UUID, *, closed_at: datetime | None = None
@@ -139,7 +151,10 @@ class LlmUsageRepository:
         )
         result = self.db.execute(statement)
         self.db.flush()
-        return (result.rowcount or 0) > 0
+        updated = (result.rowcount or 0) > 0
+        if updated:
+            self._refresh_loaded_reservation(reservation_id)
+        return updated
 
     def transition_reservation_to_released(
         self, reservation_id: UUID, *, closed_at: datetime | None = None
@@ -163,6 +178,8 @@ class LlmUsageRepository:
         result = self.db.execute(statement)
         row = result.fetchone()
         self.db.flush()
+        if row is not None:
+            self._refresh_loaded_reservation(reservation_id)
         return row[0] if row else None
 
     def transition_reservation_to_unknown(
@@ -180,7 +197,10 @@ class LlmUsageRepository:
         )
         result = self.db.execute(statement)
         self.db.flush()
-        return (result.rowcount or 0) > 0
+        updated = (result.rowcount or 0) > 0
+        if updated:
+            self._refresh_loaded_reservation(reservation_id)
+        return updated
 
     # -------------------------------------------------------------------------
     # Ledger Events
@@ -247,6 +267,28 @@ class LlmUsageRepository:
     # Quota Counters
     # -------------------------------------------------------------------------
 
+    def _refresh_loaded_counter(
+        self,
+        *,
+        scope: str,
+        scope_key: str,
+        window_kind: str,
+        window_start: date,
+    ) -> None:
+        """Refresh an already-loaded counter object in the session identity map.
+
+        When the session factory is configured with expire_on_commit=False,
+        raw SQL statements (like reserve_quota's UPSERT) or bulk updates do not
+        automatically update or expire ORM entities already loaded into memory.
+        This helper ensures any retained LlmUsageCounter instance immediately
+        reflects database state.
+        """
+        ident = (scope, scope_key, window_kind, window_start)
+        key = inspect(LlmUsageCounter).identity_key_from_primary_key(ident)
+        obj = self.db.identity_map.get(key)
+        if obj is not None:
+            self.db.refresh(obj)
+
     def reserve_quota(
         self,
         *,
@@ -275,7 +317,7 @@ class LlmUsageRepository:
                AND (:cost_limit_micros IS NULL OR :cost_micros <= :cost_limit_micros)
             ON CONFLICT (scope, scope_key, window_kind, window_start) DO UPDATE
                SET calls_reserved       = c.calls_reserved + :cost,
-                   cost_reserved_micros = c.cost_reserved_micros + :cost_micros
+                    cost_reserved_micros = c.cost_reserved_micros + :cost_micros
              WHERE (:call_limit IS NULL OR c.calls_reserved + :cost <= :call_limit)
                AND (:cost_limit_micros IS NULL OR c.cost_micros + c.cost_reserved_micros + :cost_micros <= :cost_limit_micros)
             RETURNING calls_reserved;
@@ -296,6 +338,13 @@ class LlmUsageRepository:
         )
         row = result.fetchone()
         self.db.flush()
+        if row is not None:
+            self._refresh_loaded_counter(
+                scope=scope,
+                scope_key=scope_key,
+                window_kind=window_kind,
+                window_start=window_start,
+            )
         return row[0] if row else None
 
     def settle_quota(
@@ -326,6 +375,12 @@ class LlmUsageRepository:
         )
         self.db.execute(statement)
         self.db.flush()
+        self._refresh_loaded_counter(
+            scope=scope,
+            scope_key=scope_key,
+            window_kind=window_kind,
+            window_start=window_start,
+        )
 
     def release_quota(
         self,
@@ -354,6 +409,12 @@ class LlmUsageRepository:
         )
         self.db.execute(statement)
         self.db.flush()
+        self._refresh_loaded_counter(
+            scope=scope,
+            scope_key=scope_key,
+            window_kind=window_kind,
+            window_start=window_start,
+        )
 
     def get_counter(
         self,
@@ -367,4 +428,5 @@ class LlmUsageRepository:
         return self.db.get(
             LlmUsageCounter,
             (scope, scope_key, window_kind, window_start),
+            populate_existing=True,
         )

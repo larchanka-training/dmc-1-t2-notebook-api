@@ -412,3 +412,196 @@ def test_release_quota(db_session: Session) -> None:
     assert counter.cost_reserved_micros == 5_000  # 10_000 - 5_000
     assert counter.calls_settled == 0
     assert counter.cost_micros == 0
+
+
+def test_reserve_quota_refreshes_retained_counter_identity(
+    db_session: Session,
+) -> None:
+    """Retained counter ORM object must reflect subsequent reserve mutations before and after commit.
+
+    Regression test for F1: when the session factory uses expire_on_commit=False,
+    raw textual UPSERT statements must refresh any counter instance already loaded
+    in the identity map.
+    """
+    repo = LlmUsageRepository(db_session)
+    window_start = date(2026, 9, 17)
+
+    # First reservation: 2 calls, 100 micros
+    admitted1 = repo.reserve_quota(
+        scope="user",
+        scope_key="user-f1-regress",
+        window_kind="day",
+        window_start=window_start,
+        call_cost=2,
+        cost_reserved_micros=100,
+        call_limit=10,
+        cost_limit_micros=500,
+    )
+    assert admitted1 == 2
+
+    # Retain the ORM object in memory
+    retained = repo.get_counter(
+        scope="user",
+        scope_key="user-f1-regress",
+        window_kind="day",
+        window_start=window_start,
+    )
+    assert retained is not None
+    assert retained.calls_reserved == 2
+    assert retained.cost_reserved_micros == 100
+
+    # Second reservation in the same session: another 2 calls, 100 micros
+    admitted2 = repo.reserve_quota(
+        scope="user",
+        scope_key="user-f1-regress",
+        window_kind="day",
+        window_start=window_start,
+        call_cost=2,
+        cost_reserved_micros=100,
+        call_limit=10,
+        cost_limit_micros=500,
+    )
+    assert admitted2 == 4
+
+    # Both call and cost counters on the retained object MUST update immediately
+    assert retained.calls_reserved == 4
+    assert retained.cost_reserved_micros == 200
+
+    # Commit must not reset to stale values under expire_on_commit=False
+    db_session.commit()
+    assert retained.calls_reserved == 4
+    assert retained.cost_reserved_micros == 200
+
+    # get_counter in same session returns same updated instance
+    refetched = repo.get_counter(
+        scope="user",
+        scope_key="user-f1-regress",
+        window_kind="day",
+        window_start=window_start,
+    )
+    assert refetched is retained
+    assert refetched.calls_reserved == 4
+    assert refetched.cost_reserved_micros == 200
+
+
+def test_settle_and_release_quota_refresh_retained_counter_identity(
+    db_session: Session,
+) -> None:
+    """Retained counter ORM object must reflect settle and release mutations before and after commit."""
+    repo = LlmUsageRepository(db_session)
+    window_start = date(2026, 9, 17)
+
+    repo.reserve_quota(
+        scope="user",
+        scope_key="user-settle-release-retained",
+        window_kind="day",
+        window_start=window_start,
+        call_cost=2,
+        cost_reserved_micros=10_000,
+        call_limit=10,
+        cost_limit_micros=None,
+    )
+
+    retained = repo.get_counter(
+        scope="user",
+        scope_key="user-settle-release-retained",
+        window_kind="day",
+        window_start=window_start,
+    )
+    assert retained is not None
+    assert retained.calls_reserved == 2
+    assert retained.cost_reserved_micros == 10_000
+    assert retained.calls_settled == 0
+    assert retained.cost_micros == 0
+
+    # Settle one call
+    repo.settle_quota(
+        scope="user",
+        scope_key="user-settle-release-retained",
+        window_kind="day",
+        window_start=window_start,
+        cost_reserved_micros=5_000,
+        settled_cost_micros=3_200,
+    )
+
+    assert retained.calls_reserved == 2
+    assert retained.calls_settled == 1
+    assert retained.cost_reserved_micros == 5_000
+    assert retained.cost_micros == 3_200
+
+    db_session.commit()
+    assert retained.calls_settled == 1
+    assert retained.cost_reserved_micros == 5_000
+    assert retained.cost_micros == 3_200
+
+    # Release second call
+    repo.release_quota(
+        scope="user",
+        scope_key="user-settle-release-retained",
+        window_kind="day",
+        window_start=window_start,
+        cost_reserved_micros=5_000,
+        call_count=1,
+    )
+
+    assert retained.calls_reserved == 1
+    assert retained.cost_reserved_micros == 0
+    assert retained.calls_settled == 1
+    assert retained.cost_micros == 3_200
+
+    db_session.commit()
+    assert retained.calls_reserved == 1
+    assert retained.cost_reserved_micros == 0
+
+
+def test_reservation_state_transitions_refresh_retained_instance(
+    db_session: Session,
+) -> None:
+    """Retained reservation instances must reflect state transitions before and after commit."""
+    repo = LlmUsageRepository(db_session)
+    user = _create_test_user(db_session)
+
+    res = repo.create_reservation(
+        user_id=user.id,
+        request_id=uuid4(),
+        call_kind="generator",
+        provider="openai",
+        cost_reserved_micros=5_000,
+    )
+    assert res.state == "reserved"
+    assert res.started_at is None
+    assert res.closed_at is None
+
+    # Transition to started
+    assert repo.transition_reservation_to_started(res.id) is True
+    assert res.state == "started"
+    assert res.started_at is not None
+
+    db_session.commit()
+    assert res.state == "started"
+
+    # Transition to settled
+    assert repo.transition_reservation_to_settled(res.id) is True
+    assert res.state == "settled"
+    assert res.closed_at is not None
+
+    db_session.commit()
+    assert res.state == "settled"
+
+    # Create another reservation to test release transition
+    res2 = repo.create_reservation(
+        user_id=user.id,
+        request_id=uuid4(),
+        call_kind="guard",
+        provider="bedrock",
+        cost_reserved_micros=2_500,
+    )
+    assert res2.state == "reserved"
+
+    claimed = repo.transition_reservation_to_released(res2.id)
+    assert claimed == 2_500
+    assert res2.state == "released"
+    assert res2.closed_at is not None
+
+    db_session.commit()
+    assert res2.state == "released"

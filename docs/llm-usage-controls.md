@@ -536,9 +536,10 @@ Two different numbers, and the distinction matters:
   product fix in its own right: an unbounded compiler error is already being sent to a
   paid model.
 
-  Prices come from the configured map for a pinned model, or from a configured
-  `LLM_WORST_CASE_PRICE_MICROS` when the model is chosen by the router or missing from
-  the map. An unknown model must cost the *worst* assumed price, never 0.
+  Prices come from the configured map for a pinned model, or from configured
+  `LLM_WORST_CASE_PRICE_MICROS_PROMPT` and `LLM_WORST_CASE_PRICE_MICROS_COMPLETION`
+  when the model is chosen by the router or missing from the map. An unknown model
+  must cost the *worst* assumed price, never 0.
 
 - **`estimated_cost_micros` — the settled estimate**, computed from the actual token
   usage the provider reported. This is the number the usage view shows.
@@ -570,6 +571,29 @@ the allowlist stays the gate for *access*, entitlements become the gate for *vol
 Windows are UTC calendar day/month. A rolling window would need per-event scans; a
 calendar window is a single row and is what a user-facing "resets at midnight UTC"
 message can honestly describe.
+
+### Configuration settings surface (Step 8e-1)
+
+The following deployment settings in `app/core/config.py` configure quota limits, global cost ceilings, and conservative upper-bound pricing parameters.
+
+> [!IMPORTANT]
+> **Provisional Operational Defaults**: All proposed tier limits, global ceilings, and price model parameters are provisional operational defaults for development, testing, and capacity modeling. They are **not** evidence of approved or reserved provider capacity.
+
+> [!NOTE]
+> **Deferred Enforcement Wiring**: In Step 8e-1, these settings are exposed in `Settings` and validated at application startup. Active runtime enforcement wiring into the generation pipeline (`POST /api/v1/llm/generate`) and reservation orchestration are explicitly deferred to Step 8e-2.
+
+| Environment variable | Type | Default | Units | Validation rules | Description |
+|---|---|---|---|---|---|
+| `LLM_FREE_TIER_DAILY_CALLS` | int | `20` | provider calls / day | Positive integer | Default daily provider call limit for users on `free` tier (1 generation ~= 2 calls) |
+| `LLM_FREE_TIER_MONTHLY_CALLS` | int | `200` | provider calls / month | Positive integer, `>= LLM_FREE_TIER_DAILY_CALLS` | Default monthly provider call limit for users on `free` tier |
+| `LLM_DEV_TIER_DAILY_CALLS` | int | `100` | provider calls / day | Positive integer | Default daily provider call limit for users on `developer` tier |
+| `LLM_DEV_TIER_MONTHLY_CALLS` | int | `1000` | provider calls / month | Positive integer, `>= LLM_DEV_TIER_DAILY_CALLS` | Default monthly provider call limit for users on `developer` tier |
+| `LLM_GLOBAL_DAILY_CALLS` | int | `1000` | provider calls / day | Positive integer | Global daily provider call cap across all users |
+| `LLM_GLOBAL_MONTHLY_COST_CEILING_MICROS` | int | `100000000` | micros ($100 = 100,000,000 micros) | Positive integer | Global monthly cost ceiling across all users, enforced against settled + reserved cost |
+| `LLM_WORST_CASE_PRICE_MICROS_PROMPT` | int | `5000` | micros per 1,000 tokens ($5 / 1M tokens) | Positive integer | Conservative upper-bound prompt token price for reservation sizing |
+| `LLM_WORST_CASE_PRICE_MICROS_COMPLETION` | int | `15000` | micros per 1,000 tokens ($15 / 1M tokens) | Positive integer | Conservative upper-bound completion token price for reservation sizing |
+| `LLM_SYSTEM_PROMPT_ALLOWANCE_TOKENS` | int | `1000` | tokens | Positive integer | Token buffer added to input prompt estimation for repair passes |
+| `LLM_GUARD_OUTPUT_TOKENS_MAX` | int | `100` | tokens | Positive integer | Maximum output tokens expected from safety guard evaluation pass |
 
 ## 8. Error contract
 
