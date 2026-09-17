@@ -48,6 +48,14 @@ class BedrockClient:
         self.region_name = region_name
         self.timeout_seconds = timeout_seconds
 
+    def preflight(self, *, model_id: str | None = None) -> None:
+        """Verify boto3 availability and model ID without network requests."""
+        _get_client(self.region_name, self.timeout_seconds)
+        if model_id is not None and not model_id.strip():
+            raise LlmProviderNotConfiguredError(
+                "Bedrock provider requires a non-empty model_id"
+            )
+
     def converse(
         self,
         *,
@@ -58,6 +66,7 @@ class BedrockClient:
         temperature: float,
     ) -> LlmProviderResponse:
         """Call Bedrock Converse and normalize text plus token metadata."""
+        self.preflight(model_id=model_id)
         client = _get_client(self.region_name, self.timeout_seconds)
 
         try:

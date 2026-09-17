@@ -37,9 +37,15 @@ class EsbuildSyntaxValidator:
         endpoint returns ``503`` instead of misleading ``422``.
     """
 
-    def __init__(self, command: str = "esbuild", timeout_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        command: str = "esbuild",
+        timeout_seconds: float = 5.0,
+        max_error_bytes: int = 2048,
+    ) -> None:
         self.command = command
         self.timeout_seconds = timeout_seconds
+        self.max_error_bytes = max_error_bytes
 
     def validate(self, code: str, language: str) -> SyntaxValidationResult:
         """Validate code syntax with esbuild transform over stdin."""
@@ -77,4 +83,7 @@ class EsbuildSyntaxValidator:
             return SyntaxValidationResult(ok=True)
 
         error = (completed.stderr or completed.stdout or "esbuild validation failed").strip()
+        error_bytes = error.encode("utf-8")
+        if len(error_bytes) > self.max_error_bytes:
+            error = error_bytes[: self.max_error_bytes].decode("utf-8", "ignore")
         return SyntaxValidationResult(ok=False, error=error)

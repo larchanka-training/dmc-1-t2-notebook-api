@@ -35,6 +35,13 @@ class LlmProviderResponse:
 class LlmProvider(Protocol):
     """Provider boundary used by the generation service, tests and adapters."""
 
+    def preflight(self, *, model_id: str | None = None) -> None:
+        """Verify local adapter configuration without network calls.
+
+        Raises:
+            LlmProviderNotConfiguredError: If adapter is misconfigured or missing credentials.
+        """
+
     def converse(
         self,
         *,

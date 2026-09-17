@@ -1901,7 +1901,7 @@
                 }
               }
             },
-            "description": "Per-user LLM rate limit exceeded"
+            "description": "Per-user LLM rate limit or usage quota exceeded"
           },
           "500": {
             "content": {

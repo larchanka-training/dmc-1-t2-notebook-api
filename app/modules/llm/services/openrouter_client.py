@@ -89,6 +89,19 @@ class OpenRouterClient:
         self.app_referer = app_referer
         self._transport: Transport = transport or _urllib_transport
 
+    def preflight(self, *, model_id: str | None = None) -> None:
+        """Verify OpenRouter key and model ID without network requests."""
+        if not self.api_key:
+            # Configuration is validated at startup; this guards the case where a
+            # service instance is built directly (tests, scripts) without a key.
+            raise LlmProviderNotConfiguredError(
+                "OpenRouter provider requires LLM_OPENROUTER_API_KEY to be set"
+            )
+        if model_id is not None and not model_id.strip():
+            raise LlmProviderNotConfiguredError(
+                "OpenRouter provider requires a non-empty model_id"
+            )
+
     def converse(
         self,
         *,
@@ -99,12 +112,7 @@ class OpenRouterClient:
         temperature: float,
     ) -> LlmProviderResponse:
         """Call OpenRouter chat completions and normalize the response."""
-        if not self.api_key:
-            # Configuration is validated at startup; this guards the case where a
-            # service instance is built directly (tests, scripts) without a key.
-            raise LlmProviderNotConfiguredError(
-                "OpenRouter provider requires LLM_OPENROUTER_API_KEY to be set"
-            )
+        self.preflight(model_id=model_id)
 
         payload = {
             "model": model_id,

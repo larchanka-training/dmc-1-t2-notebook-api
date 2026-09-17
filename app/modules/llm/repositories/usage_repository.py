@@ -116,6 +116,17 @@ class LlmUsageRepository:
         )
         return list(self.db.execute(statement).scalars().all())
 
+    def get_reservations_by_user_id(
+        self, user_id: UUID
+    ) -> list[LlmUsageReservation]:
+        """Fetch all reservations for a given user_id in creation order."""
+        statement = (
+            select(LlmUsageReservation)
+            .where(LlmUsageReservation.user_id == user_id)
+            .order_by(LlmUsageReservation.created_at.asc())
+        )
+        return list(self.db.execute(statement).scalars().all())
+
     def transition_reservation_to_started(
         self, reservation_id: UUID, *, started_at: datetime | None = None
     ) -> bool:

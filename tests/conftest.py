@@ -80,6 +80,18 @@ def db_session() -> Generator[Session, None, None]:
 
 
 @pytest.fixture
+def db_session_factory(db_session: Session) -> sessionmaker[Session]:
+    bind = db_session.get_bind()
+    return sessionmaker(
+        bind=bind,
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+
+@pytest.fixture
 def client(db_session: Session) -> Generator[TestClient, None, None]:
     def override_db() -> Generator[Session, None, None]:
         yield db_session

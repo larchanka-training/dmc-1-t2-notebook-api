@@ -15,19 +15,27 @@ from app.modules.llm.schemas.llm_schemas import (
     ResultKind,
     TokenUsage,
 )
+from sqlalchemy.orm import Session, sessionmaker
+
 from app.modules.llm.services.bedrock_client import BedrockClient, parse_guard_json
 from app.modules.llm.services.openrouter_client import OpenRouterClient
 from app.modules.llm.services.provider import LlmProvider, LlmProviderResponse
 from app.modules.llm.services.errors import (
     CodeValidationError,
+    LlmProviderNotConfiguredError,
+    LlmTimeoutError,
     PromptRejectedError,
     TextGenerationError,
 )
 from app.modules.llm.services.output_extractor import extract_code
-from app.modules.llm.services.syntax_validator import EsbuildSyntaxValidator
-from app.modules.llm.services.syntax_validator import SyntaxValidationResult
+from app.modules.llm.services.syntax_validator import (
+    EsbuildSyntaxValidator,
+    SyntaxValidationResult,
+)
+from app.modules.llm.services.usage_service import LlmUsageService
 
 logger = get_logger(__name__)
+
 
 
 class SyntaxValidator(Protocol):
@@ -50,6 +58,9 @@ class LlmGenerationService:
         max_retries: int,
         max_tokens: int,
         temperature: float,
+        usage_service: LlmUsageService | None = None,
+        provider_name: str | None = None,
+        validation_error_max_bytes: int | None = None,
     ) -> None:
         self.provider = provider
         self.syntax_validator = syntax_validator
@@ -58,6 +69,13 @@ class LlmGenerationService:
         self.max_retries = max_retries
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.usage_service = usage_service
+        self.provider_name = provider_name or settings.normalized_llm_provider
+        self.validation_error_max_bytes = (
+            validation_error_max_bytes
+            if validation_error_max_bytes is not None
+            else settings.llm_validation_error_max_bytes
+        )
 
     def generate(self, payload: GenerateRequest, user: CurrentUser) -> GenerateResponse:
         """Generate validated code for an authenticated user."""
@@ -71,10 +89,27 @@ class LlmGenerationService:
             prompt_length=len(payload.prompt),
         )
         result_kind = _infer_result_kind(payload)
-        self._guard_prompt(payload, user, request_id)
-        provider_response = self._generate_model_response(payload, result_kind)
+
+        guard_res_id: UUID | None = None
+        gen_res_id: UUID | None = None
+
+        if self.usage_service is not None:
+            prompt_bytes = len(payload.prompt.encode("utf-8"))
+            guard_res_id, gen_res_id = self.usage_service.reserve_initial_generation(
+                user=user,
+                request_id=request_id,
+                provider=self.provider_name,
+                prompt_bytes=prompt_bytes,
+            )
+
+        self._guard_prompt(payload, user, request_id, guard_res_id, gen_res_id)
+        provider_response = self._generate_model_response(
+            payload, result_kind, user, request_id, gen_res_id
+        )
         if result_kind == "code":
-            content, final_response = self._validate_or_repair(payload, provider_response)
+            content, final_response = self._validate_or_repair(
+                payload, provider_response, user, request_id
+            )
         else:
             content = _extract_text(provider_response.text)
             final_response = provider_response
@@ -91,8 +126,6 @@ class LlmGenerationService:
             completion_tokens=final_response.completion_tokens,
             prompt_length=len(payload.prompt),
             result_kind=result_kind,
-            # Split the counter so post-mortems can tell apart what the user
-            # *sent* and what the guard *evaluated*: see _truncate_context_for_guard.
             request_context_cells=len(payload.context),
             guard_context_cells=min(len(payload.context), _GUARD_CONTEXT_MAX_CELLS),
         )
@@ -113,54 +146,180 @@ class LlmGenerationService:
         payload: GenerateRequest,
         user: CurrentUser,
         request_id: UUID,
+        guard_res_id: UUID | None,
+        gen_res_id: UUID | None,
     ) -> None:
-        guard_response = self.provider.converse(
-            model_id=self.guard_model_id,
-            system_prompt=_guard_system_prompt(),
-            user_prompt=_build_guard_prompt(payload),
-            max_tokens=256,
-            temperature=0.0,
-        )
-        if not parse_guard_json(guard_response.text):
+        if self.usage_service is not None and guard_res_id is not None:
+            try:
+                self.usage_service.start_call(
+                    reservation_id=guard_res_id,
+                    provider=self.provider,
+                    model_id=self.guard_model_id,
+                    user_id=user.id,
+                )
+            except LlmProviderNotConfiguredError:
+                # Preflight failed before guard started. start_call already released guard_res_id.
+                # Now also release the downstream generator reservation in full.
+                if gen_res_id is not None:
+                    self.usage_service.release_reservation(
+                        reservation_id=gen_res_id, user_id=user.id
+                    )
+                raise
+
+        guard_response = None
+        try:
+            guard_response = self.provider.converse(
+                model_id=self.guard_model_id,
+                system_prompt=_guard_system_prompt(),
+                user_prompt=_build_guard_prompt(payload),
+                max_tokens=256,
+                temperature=0.0,
+            )
+            is_safe = parse_guard_json(guard_response.text)
+        except Exception as exc:
+            if self.usage_service is not None and guard_res_id is not None:
+                status = (
+                    "timeout"
+                    if isinstance(exc, (TimeoutError, LlmTimeoutError))
+                    or "timeout" in type(exc).__name__.lower()
+                    else "provider_error"
+                )
+                model_id = (
+                    guard_response.model
+                    if guard_response
+                    else getattr(exc, "model", None)
+                )
+                self.usage_service.settle_call(
+                    reservation_id=guard_res_id,
+                    user_id=user.id,
+                    request_id=request_id,
+                    call_kind="guard",
+                    provider_name=self.provider_name,
+                    model_id=model_id,
+                    response=guard_response,
+                    status=status,
+                )
+                self.usage_service.release_downstream_reservations(
+                    request_id=request_id, user_id=user.id
+                )
+            raise
+
+        if not is_safe:
+            if self.usage_service is not None and guard_res_id is not None:
+                self.usage_service.settle_call(
+                    reservation_id=guard_res_id,
+                    user_id=user.id,
+                    request_id=request_id,
+                    call_kind="guard",
+                    provider_name=self.provider_name,
+                    model_id=guard_response.model,
+                    response=guard_response,
+                    status="ok",
+                )
+                self.usage_service.release_downstream_reservations(
+                    request_id=request_id, user_id=user.id
+                )
             logger.info(
                 "llm.guard.rejected",
                 request_id=str(request_id),
                 user_id=str(user.id),
                 model=guard_response.model,
                 prompt_length=len(payload.prompt),
-                # ``request_context_cells`` = what the user sent;
-                # ``guard_context_cells`` = what the classifier actually saw
-                # after _truncate_context_for_guard. When a rejection is
-                # investigated, the second number is the one that drove the
-                # decision — see _GUARD_CONTEXT_MAX_CELLS.
                 request_context_cells=len(payload.context),
                 guard_context_cells=min(len(payload.context), _GUARD_CONTEXT_MAX_CELLS),
                 has_base_code=bool(payload.base_code),
             )
             raise PromptRejectedError("Prompt was rejected by the safety guard")
 
+        if self.usage_service is not None and guard_res_id is not None:
+            self.usage_service.settle_call(
+                reservation_id=guard_res_id,
+                user_id=user.id,
+                request_id=request_id,
+                call_kind="guard",
+                provider_name=self.provider_name,
+                model_id=guard_response.model,
+                response=guard_response,
+                status="ok",
+            )
+
     def _generate_model_response(
-        self, payload: GenerateRequest, result_kind: ResultKind
+        self,
+        payload: GenerateRequest,
+        result_kind: ResultKind,
+        user: CurrentUser,
+        request_id: UUID,
+        gen_res_id: UUID | None,
     ) -> LlmProviderResponse:
-        return self.provider.converse(
-            model_id=self.generator_model_id,
-            system_prompt=_generation_system_prompt(payload.language, result_kind),
-            user_prompt=_build_generation_prompt(
-                payload,
-                context_override=(
-                    _truncate_context_for_guard(payload)
-                    if result_kind == "text"
-                    else None
+        if self.usage_service is not None and gen_res_id is not None:
+            self.usage_service.start_call(
+                reservation_id=gen_res_id,
+                provider=self.provider,
+                model_id=self.generator_model_id,
+                user_id=user.id,
+            )
+
+        provider_response = None
+        try:
+            provider_response = self.provider.converse(
+                model_id=self.generator_model_id,
+                system_prompt=_generation_system_prompt(payload.language, result_kind),
+                user_prompt=_build_generation_prompt(
+                    payload,
+                    context_override=(
+                        _truncate_context_for_guard(payload)
+                        if result_kind == "text"
+                        else None
+                    ),
                 ),
-            ),
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-        )
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+            )
+        except Exception as exc:
+            if self.usage_service is not None and gen_res_id is not None:
+                status = (
+                    "timeout"
+                    if isinstance(exc, (TimeoutError, LlmTimeoutError))
+                    or "timeout" in type(exc).__name__.lower()
+                    else "provider_error"
+                )
+                model_id = (
+                    provider_response.model
+                    if provider_response
+                    else getattr(exc, "model", None)
+                )
+                self.usage_service.settle_call(
+                    reservation_id=gen_res_id,
+                    user_id=user.id,
+                    request_id=request_id,
+                    call_kind="generator",
+                    provider_name=self.provider_name,
+                    model_id=model_id,
+                    response=provider_response,
+                    status=status,
+                )
+            raise
+
+        if self.usage_service is not None and gen_res_id is not None:
+            self.usage_service.settle_call(
+                reservation_id=gen_res_id,
+                user_id=user.id,
+                request_id=request_id,
+                call_kind="generator",
+                provider_name=self.provider_name,
+                model_id=provider_response.model,
+                response=provider_response,
+                status="ok",
+            )
+
+        return provider_response
 
     def _validate_or_repair(
         self,
         payload: GenerateRequest,
         provider_response: LlmProviderResponse,
+        user: CurrentUser,
+        request_id: UUID,
     ) -> tuple[str, LlmProviderResponse]:
         current_response = provider_response
         attempts = self.max_retries + 1
@@ -182,17 +341,77 @@ class LlmGenerationService:
                     "Generated code did not pass syntax validation"
                 )
 
-            current_response = self.provider.converse(
-                model_id=self.generator_model_id,
-                system_prompt=_generation_system_prompt(payload.language, "code"),
-                user_prompt=_build_repair_prompt(payload, code, validation.error or ""),
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
+            raw_error = validation.error or ""
+            capped_error = _truncate_validation_error(
+                raw_error, self.validation_error_max_bytes
             )
+            repair_prompt = _build_repair_prompt(payload, code, capped_error)
+            repair_res_id = None
+            if self.usage_service is not None:
+                repair_res_id = self.usage_service.reserve_repair_call(
+                    user=user,
+                    request_id=request_id,
+                    provider=self.provider_name,
+                    repair_prompt=repair_prompt,
+                )
+                self.usage_service.start_call(
+                    reservation_id=repair_res_id,
+                    provider=self.provider,
+                    model_id=self.generator_model_id,
+                    user_id=user.id,
+                )
 
-        # Loop exits only via ``return`` on success or ``raise`` on the
-        # final attempt. No fall-through ``raise`` is needed below.
+            repair_response = None
+            try:
+                repair_response = self.provider.converse(
+                    model_id=self.generator_model_id,
+                    system_prompt=_generation_system_prompt(payload.language, "code"),
+                    user_prompt=repair_prompt,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                )
+            except Exception as exc:
+                if self.usage_service is not None and repair_res_id is not None:
+                    status = (
+                        "timeout"
+                        if isinstance(exc, (TimeoutError, LlmTimeoutError))
+                        or "timeout" in type(exc).__name__.lower()
+                        else "provider_error"
+                    )
+                    model_id = (
+                        repair_response.model
+                        if repair_response
+                        else getattr(exc, "model", None)
+                    )
+                    self.usage_service.settle_call(
+                        reservation_id=repair_res_id,
+                        user_id=user.id,
+                        request_id=request_id,
+                        call_kind="repair",
+                        provider_name=self.provider_name,
+                        model_id=model_id,
+                        response=repair_response,
+                        status=status,
+                    )
+                raise
+
+            if self.usage_service is not None and repair_res_id is not None:
+                self.usage_service.settle_call(
+                    reservation_id=repair_res_id,
+                    user_id=user.id,
+                    request_id=request_id,
+                    call_kind="repair",
+                    provider_name=self.provider_name,
+                    model_id=repair_response.model,
+                    response=repair_response,
+                    status="ok",
+                )
+
+            current_response = repair_response
+
+        # Loop exits only via return on success or raise on final attempt.
         raise AssertionError("unreachable: _validate_or_repair loop did not terminate")
+
 
 
 _GUARD_CONTEXT_MAX_CELLS = 3
@@ -316,6 +535,15 @@ def _infer_result_kind(payload: GenerateRequest) -> ResultKind:
     if any(pattern.search(prompt) for pattern in _TEXT_RESULT_PATTERNS):
         return "text"
     return "code"
+
+
+def _truncate_validation_error(error_text: str, max_bytes: int) -> str:
+    """Truncate validator error string to max_bytes, appending '[truncated]' if cut."""
+    encoded = error_text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return error_text
+    truncated = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    return f"{truncated} [truncated]"
 
 
 def _extract_text(raw: str) -> str:
@@ -499,13 +727,20 @@ def build_provider() -> tuple[LlmProvider, str, str]:
     )
 
 
-def build_generation_service() -> LlmGenerationService:
+def build_generation_service(
+    session_factory: sessionmaker[Session] | None = None,
+) -> LlmGenerationService:
     """Build the default generation service from application settings."""
     provider, guard_model_id, generator_model_id = build_provider()
     syntax_validator = EsbuildSyntaxValidator(
         command=settings.llm_esbuild_command,
         timeout_seconds=settings.llm_validation_timeout_seconds,
+        max_error_bytes=settings.llm_validation_error_max_bytes,
     )
+    from app.core.db import get_session_factory
+
+    sf = session_factory or get_session_factory()
+    usage_service = LlmUsageService(session_factory=sf, settings=settings)
     return LlmGenerationService(
         provider,
         syntax_validator,
@@ -514,4 +749,7 @@ def build_generation_service() -> LlmGenerationService:
         max_retries=settings.llm_validation_max_retries,
         max_tokens=settings.llm_max_tokens,
         temperature=settings.llm_temperature,
+        usage_service=usage_service,
+        provider_name=settings.normalized_llm_provider,
+        validation_error_max_bytes=settings.llm_validation_error_max_bytes,
     )
