@@ -110,6 +110,20 @@ class Settings(BaseSettings):
     # Strategy id for the summary service; switch implementations via env without
     # touching call sites. Resolved by build_summary_service(); unknown → error.
     llm_context_summary_strategy: str = "compact-oldest"
+    # LLM usage controls & quotas (Step 8e-1, docs/llm-usage-controls.md §6, §7).
+    # Default call limits per tier (1 generation ~= 2 provider calls: guard + generator).
+    llm_free_tier_daily_calls: int = 20
+    llm_free_tier_monthly_calls: int = 200
+    llm_dev_tier_daily_calls: int = 100
+    llm_dev_tier_monthly_calls: int = 1000
+    # Global limits across all users.
+    llm_global_daily_calls: int = 1000
+    llm_global_monthly_cost_ceiling_micros: int = 100_000_000  # $100 in micros
+    # Conservative price modeling parameters for reserved upper bound.
+    llm_worst_case_price_micros_prompt: int = 5_000  # $5 / 1M = 5,000 micros / 1K tokens
+    llm_worst_case_price_micros_completion: int = 15_000  # $15 / 1M = 15,000 micros / 1K tokens
+    llm_system_prompt_allowance_tokens: int = 1_000
+    llm_guard_output_tokens_max: int = 100
     # Backend code-execution endpoint (POST /api/v1/execute). Disabled by
     # default: it is a debug/fallback runner, not the production sandbox.
     # See docs/execution-architecture.md §12. The subprocess runner is NOT a
@@ -223,6 +237,36 @@ class Settings(BaseSettings):
             raise ValueError("LLM_MAX_TOKENS must be positive")
         if not 0 <= self.llm_temperature <= 2:
             raise ValueError("LLM_TEMPERATURE must be between 0 and 2")
+        if self.llm_free_tier_daily_calls <= 0:
+            raise ValueError("LLM_FREE_TIER_DAILY_CALLS must be positive")
+        if self.llm_free_tier_monthly_calls <= 0:
+            raise ValueError("LLM_FREE_TIER_MONTHLY_CALLS must be positive")
+        if self.llm_free_tier_monthly_calls < self.llm_free_tier_daily_calls:
+            raise ValueError(
+                "LLM_FREE_TIER_MONTHLY_CALLS must be greater than or equal to "
+                "LLM_FREE_TIER_DAILY_CALLS"
+            )
+        if self.llm_dev_tier_daily_calls <= 0:
+            raise ValueError("LLM_DEV_TIER_DAILY_CALLS must be positive")
+        if self.llm_dev_tier_monthly_calls <= 0:
+            raise ValueError("LLM_DEV_TIER_MONTHLY_CALLS must be positive")
+        if self.llm_dev_tier_monthly_calls < self.llm_dev_tier_daily_calls:
+            raise ValueError(
+                "LLM_DEV_TIER_MONTHLY_CALLS must be greater than or equal to "
+                "LLM_DEV_TIER_DAILY_CALLS"
+            )
+        if self.llm_global_daily_calls <= 0:
+            raise ValueError("LLM_GLOBAL_DAILY_CALLS must be positive")
+        if self.llm_global_monthly_cost_ceiling_micros <= 0:
+            raise ValueError("LLM_GLOBAL_MONTHLY_COST_CEILING_MICROS must be positive")
+        if self.llm_worst_case_price_micros_prompt <= 0:
+            raise ValueError("LLM_WORST_CASE_PRICE_MICROS_PROMPT must be positive")
+        if self.llm_worst_case_price_micros_completion <= 0:
+            raise ValueError("LLM_WORST_CASE_PRICE_MICROS_COMPLETION must be positive")
+        if self.llm_system_prompt_allowance_tokens <= 0:
+            raise ValueError("LLM_SYSTEM_PROMPT_ALLOWANCE_TOKENS must be positive")
+        if self.llm_guard_output_tokens_max <= 0:
+            raise ValueError("LLM_GUARD_OUTPUT_TOKENS_MAX must be positive")
         if self.execute_default_timeout_ms <= 0:
             raise ValueError("EXECUTE_DEFAULT_TIMEOUT_MS must be positive")
         if self.execute_max_timeout_ms <= 0:
