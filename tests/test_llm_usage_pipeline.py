@@ -5,10 +5,13 @@ A. Database concurrency and invariant suite (Tests 1-11)
 B. Unit and adapter suite (Tests 12-13)
 """
 
-from collections.abc import Callable
 import concurrent.futures
+import multiprocessing
+import os
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
@@ -17,18 +20,62 @@ from app.core.config import Settings
 from app.modules.auth.models.user import User as UserModel
 from app.modules.auth.schemas import CurrentUser
 from app.modules.llm.repositories import LlmUsageRepository
-from app.modules.llm.schemas import GenerateRequest
+from app.modules.llm.schemas import GenerateRequest, LlmContextCell
 from app.modules.llm.services.errors import (
     LlmProviderError,
     LlmProviderNotConfiguredError,
     LlmQuotaExceededError,
+    LlmServiceError,
     LlmTimeoutError,
     PromptRejectedError,
 )
-from app.modules.llm.services.generation_service import LlmGenerationService
+from app.modules.llm.services.generation_service import (
+    LlmGenerationService,
+    _build_generation_prompt,
+    _build_guard_prompt,
+    _truncate_validation_error,
+)
 from app.modules.llm.services.provider import LlmProviderResponse
 from app.modules.llm.services.syntax_validator import SyntaxValidationResult
 from app.modules.llm.services.usage_service import LlmUsageService
+
+
+def _worker_crash_mid_call(db_url: str, user_id: UUID) -> None:
+    """Worker process that starts generation and terminates abruptly with os._exit(42)."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.modules.auth.schemas import CurrentUser
+    from app.modules.llm.schemas import GenerateRequest
+    from app.modules.llm.services.provider import LlmProviderResponse
+
+    engine = create_engine(db_url)
+    factory = sessionmaker(bind=engine)
+    user = CurrentUser(
+        id=user_id,
+        email="worker@notebook.local",
+        display_name="Worker",
+        roles=[],
+    )
+
+    def crash_hook(call_args: dict[str, object]) -> None:
+        # Pre-call reservations are committed to DB before converse.
+        # Now kill process ungracefully with os._exit (no cleanup or finally blocks).
+        os._exit(42)
+
+    provider = FakePipelineProvider(
+        converse_hook=crash_hook,
+        responses=[
+            LlmProviderResponse(
+                text='{"safe": true}',
+                model="guard",
+                prompt_tokens=10,
+                completion_tokens=5,
+            )
+        ],
+    )
+    svc, _ = _build_test_service(factory, provider)
+    svc.generate(GenerateRequest(prompt="crash test"), user)
+
 
 
 class FakePipelineProvider:
@@ -170,39 +217,41 @@ def _build_test_service(
 
 
 def test_1_two_simultaneous_generations_at_limit_minus_call_cost(
-    db_session: Session, db_session_factory: sessionmaker[Session]
+    pg_session_factory: sessionmaker[Session],
 ) -> None:
     """1. Two simultaneous generations at limit - call_cost (limit - 2) => exactly one succeeds.
 
     Generation reserves 2 provider calls (guard + generator).
     At limit - 2, exactly one generation passes and the other fails with LlmQuotaExceededError.
+    Verified on real PostgreSQL without Python locks using threading.Barrier(2).
     """
-    user_model, current_user = _create_user(db_session)
-    repo = LlmUsageRepository(db_session)
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        repo = LlmUsageRepository(session)
 
-    # Entitlement: user limit = 10 calls/day
-    limit = 10
-    repo.upsert_entitlement(
-        user_id=user_model.id,
-        tier="developer",
-        daily_call_limit=limit,
-        monthly_call_limit=100,
-    )
-    day_start = datetime.now(UTC).date()
+        # Entitlement: user limit = 10 calls/day
+        limit = 10
+        repo.upsert_entitlement(
+            user_id=user_model.id,
+            tier="developer",
+            daily_call_limit=limit,
+            monthly_call_limit=100,
+        )
+        day_start = datetime.now(UTC).date()
 
-    # Pre-seed counter to limit - call_cost = 8
-    repo.reserve_quota(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="day",
-        window_start=day_start,
-        call_cost=limit - 2,  # 8
-        cost_reserved_micros=10_000,
-        call_limit=limit,
-    )
-    db_session.commit()
+        # Pre-seed counter to limit - call_cost = 8
+        repo.reserve_quota(
+            scope="user",
+            scope_key=str(user_model.id),
+            window_kind="day",
+            window_start=day_start,
+            call_cost=limit - 2,  # 8
+            cost_reserved_micros=10_000,
+            call_limit=limit,
+        )
+        session.commit()
 
-    # Create service
+    # Create service with PostgreSQL session factory
     provider = FakePipelineProvider(
         responses=[
             LlmProviderResponse(text='{"safe": true}', model="guard", prompt_tokens=10, completion_tokens=5),
@@ -211,18 +260,16 @@ def test_1_two_simultaneous_generations_at_limit_minus_call_cost(
             LlmProviderResponse(text='console.log("second");', model="gen", prompt_tokens=20, completion_tokens=10),
         ]
     )
-    svc, usage_svc = _build_test_service(db_session_factory, provider)
+    svc, _ = _build_test_service(pg_session_factory, provider)
 
-    import threading
-
-    db_lock = threading.Lock()
+    barrier = threading.Barrier(2)
     results: list[object] = []
     errors: list[Exception] = []
 
     def call_gen() -> None:
+        barrier.wait()
         try:
-            with db_lock:
-                res = svc.generate(GenerateRequest(prompt="test concurrency"), current_user)
+            res = svc.generate(GenerateRequest(prompt="test concurrency"), current_user)
             results.append(res)
         except Exception as exc:
             errors.append(exc)
@@ -241,7 +288,7 @@ def test_1_two_simultaneous_generations_at_limit_minus_call_cost(
 
 
 def test_2_first_request_on_empty_table_and_initialized_arithmetic(
-    db_session: Session, db_session_factory: sessionmaker[Session]
+    pg_session_factory: sessionmaker[Session],
 ) -> None:
     """2. First request on empty table and initialized arithmetic.
 
@@ -249,22 +296,23 @@ def test_2_first_request_on_empty_table_and_initialized_arithmetic(
     - Empty table: valid first request admitted with calls_settled=0 and cost_micros=0,
       settles, and then a second request admits with correctly evaluated arithmetic.
     """
-    user_model, current_user = _create_user(db_session)
-    day_start = datetime.now(UTC).date()
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        day_start = datetime.now(UTC).date()
 
-    # Part 2a: Empty table + limit exceeded on first request
-    # Set entitlement limit = 1 call. Since generation requires 2 calls, conditional INSERT must fail.
-    repo = LlmUsageRepository(db_session)
-    repo.upsert_entitlement(
-        user_id=user_model.id,
-        tier="restricted",
-        daily_call_limit=1,
-        monthly_call_limit=10,
-    )
-    db_session.commit()
+        # Part 2a: Empty table + limit exceeded on first request
+        # Set entitlement limit = 1 call. Since generation requires 2 calls, conditional INSERT must fail.
+        repo = LlmUsageRepository(session)
+        repo.upsert_entitlement(
+            user_id=user_model.id,
+            tier="free",
+            daily_call_limit=1,
+            monthly_call_limit=10,
+        )
+        session.commit()
 
     provider = FakePipelineProvider()
-    svc, usage_svc = _build_test_service(db_session_factory, provider)
+    svc, _ = _build_test_service(pg_session_factory, provider)
 
     with pytest.raises(LlmQuotaExceededError) as exc_info:
         svc.generate(GenerateRequest(prompt="first call on empty table"), current_user)
@@ -272,23 +320,27 @@ def test_2_first_request_on_empty_table_and_initialized_arithmetic(
     assert exc_info.value.window_kind == "day"
 
     # Counter row should NOT exist because conditional INSERT refused it
-    counter = repo.get_counter(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="day",
-        window_start=day_start,
-    )
-    assert counter is None
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        counter = repo.get_counter(
+            scope="user",
+            scope_key=str(user_model.id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        assert counter is None
 
     # Part 2b: Empty table + valid first request
-    user_model_2, current_user_2 = _create_user(db_session)
-    repo.upsert_entitlement(
-        user_id=user_model_2.id,
-        tier="normal",
-        daily_call_limit=10,
-        monthly_call_limit=100,
-    )
-    db_session.commit()
+    with pg_session_factory() as session:
+        user_model_2, current_user_2 = _create_user(session)
+        repo = LlmUsageRepository(session)
+        repo.upsert_entitlement(
+            user_id=user_model_2.id,
+            tier="developer",
+            daily_call_limit=10,
+            monthly_call_limit=100,
+        )
+        session.commit()
 
     provider2 = FakePipelineProvider(
         responses=[
@@ -298,32 +350,41 @@ def test_2_first_request_on_empty_table_and_initialized_arithmetic(
             LlmProviderResponse(text='console.log("second admitted");', model="gen", prompt_tokens=20, completion_tokens=10),
         ]
     )
-    svc2, _ = _build_test_service(db_session_factory, provider2)
+    svc2, _ = _build_test_service(pg_session_factory, provider2)
 
     # First request
     res1 = svc2.generate(GenerateRequest(prompt="call 1"), current_user_2)
     assert res1.content == 'console.log("admitted");'
 
     # Verify counter has non-null initialized values
-    counter2 = repo.get_counter(
-        scope="user",
-        scope_key=str(user_model_2.id),
-        window_kind="day",
-        window_start=day_start,
-    )
-    assert counter2 is not None
-    assert counter2.calls_settled == 2
-    assert counter2.calls_reserved == 2
-    assert counter2.cost_micros > 0
-    assert counter2.cost_reserved_micros == 0
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        counter2 = repo.get_counter(
+            scope="user",
+            scope_key=str(user_model_2.id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        assert counter2 is not None
+        assert counter2.calls_settled == 2
+        assert counter2.calls_reserved == 2
+        assert counter2.cost_micros > 0
+        assert counter2.cost_reserved_micros == 0
 
     # Second request evaluates arithmetic against initialized non-null values
     res2 = svc2.generate(GenerateRequest(prompt="call 2"), current_user_2)
     assert res2.content == 'console.log("second admitted");'
 
-    db_session.refresh(counter2)
-    assert counter2.calls_settled == 4
-    assert counter2.calls_reserved == 4
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        counter2 = repo.get_counter(
+            scope="user",
+            scope_key=str(user_model_2.id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        assert counter2.calls_settled == 4
+        assert counter2.calls_reserved == 4
 
 
 def test_3_settlement_is_idempotent(
@@ -406,40 +467,32 @@ def test_3_settlement_is_idempotent(
 
 
 def test_4_pre_call_reservation_persistence(
-    db_session: Session, db_session_factory: sessionmaker[Session]
+    pg_session_factory: sessionmaker[Session],
 ) -> None:
-    """4. Pre-call reservation persistence: committed before provider call and survives worker crash."""
-    user_model, current_user = _create_user(db_session)
-    checked_in_db = False
+    """4. Pre-call reservation persistence: committed before provider call and survives worker crash.
 
-    def on_provider_call(call_args: dict[str, object]) -> None:
-        nonlocal checked_in_db
-        # Open an independent session to inspect database during provider call
-        with db_session_factory() as inspect_session:
-            inspect_repo = LlmUsageRepository(inspect_session)
-            reservations = inspect_repo.get_reservations_by_user_id(user_model.id)
-            # Both guard and generator reservations were committed before any provider converse call!
-            assert len(reservations) == 2
-            states = {r.call_kind: r.state for r in reservations}
-            # Guard has reached started, generator is still reserved
-            assert states.get("guard") == "started"
-            assert states.get("generator") == "reserved"
-            checked_in_db = True
-        # Simulate worker dying / unhandled crash mid-call
-        raise RuntimeError("Worker process terminated abruptly mid-inference")
+    Demonstrated via real subprocess termination (os._exit(42)) mid-call against PostgreSQL.
+    """
+    db_url = getattr(pg_session_factory, "db_url")
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        user_id = user_model.id
 
-    provider = FakePipelineProvider(converse_hook=on_provider_call)
-    svc, _ = _build_test_service(db_session_factory, provider)
+    ctx = multiprocessing.get_context("spawn")
+    p = ctx.Process(target=_worker_crash_mid_call, args=(db_url, user_id))
+    p.start()
+    p.join(timeout=10)
 
-    with pytest.raises(RuntimeError, match="Worker process terminated abruptly"):
-        svc.generate(GenerateRequest(prompt="crash test"), current_user)
+    assert p.exitcode == 42, f"Expected worker to exit with 42, got {p.exitcode}"
 
-    assert checked_in_db is True
-
-    # Check that reservations survived in database after the crash
-    repo = LlmUsageRepository(db_session)
-    reservations = repo.get_reservations_by_user_id(user_model.id)
-    assert len(reservations) == 2
+    # Check that reservations survived in database after unhandled crash
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        reservations = repo.get_reservations_by_user_id(user_id)
+        assert len(reservations) == 2
+        states = {r.call_kind: r.state for r in reservations}
+        assert states.get("guard") == "started"
+        assert states.get("generator") == "reserved"
 
 
 def test_5_cost_ceiling_enforcement(
@@ -477,8 +530,14 @@ def test_6_ceiling_binds_after_settlement(
     provider = FakePipelineProvider()
     svc, usage_svc = _build_test_service(db_session_factory, provider, settings=settings)
 
-    prompt_bytes = len("short prompt".encode("utf-8"))
-    total_req_bound = usage_svc.compute_guard_cost_bound() + usage_svc.compute_generator_cost_bound(prompt_bytes)
+    req = GenerateRequest(prompt="short prompt")
+    guard_user_prompt = _build_guard_prompt(req)
+    gen_user_prompt = _build_generation_prompt(req)
+    total_req_bound = usage_svc.compute_guard_cost_bound(
+        len(guard_user_prompt.encode("utf-8"))
+    ) + usage_svc.compute_generator_cost_bound(
+        len(gen_user_prompt.encode("utf-8"))
+    )
 
     # Settle prior spending into the counter so cost_micros is close to ceiling
     # cost_micros = 100_000 - (total_req_bound - 10)
@@ -502,7 +561,7 @@ def test_6_ceiling_binds_after_settlement(
 
     # Now cost_micros + total_req_bound > 100_000
     with pytest.raises(LlmQuotaExceededError) as exc_info:
-        svc.generate(GenerateRequest(prompt="short prompt"), current_user)
+        svc.generate(req, current_user)
 
     assert exc_info.value.scope == "global"
     assert exc_info.value.window_kind == "month"
@@ -786,50 +845,43 @@ def test_9_failure_paths_and_partial_usage_keep_full_bound(
 
 
 def test_10_concurrent_release_idempotency(
-    db_session: Session, db_session_factory: sessionmaker[Session]
+    pg_session_factory: sessionmaker[Session],
 ) -> None:
     """10. Concurrent release idempotency: two simultaneous releasers resolve through atomic gate.
 
     Exactly one state change occurs and exactly one counter deduction is made.
+    Verified on PostgreSQL without Python locks using threading.Barrier(2).
     """
-    user_model, current_user = _create_user(db_session)
-    repo = LlmUsageRepository(db_session)
-    day_start = datetime.now(UTC).date()
-    _, usage_svc = _build_test_service(db_session_factory, FakePipelineProvider())
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        repo = LlmUsageRepository(session)
+        day_start = datetime.now(UTC).date()
+        res = repo.create_reservation(
+            user_id=user_model.id,
+            request_id=uuid4(),
+            call_kind="generator",
+            provider="openrouter",
+            cost_reserved_micros=8_000,
+        )
+        repo.reserve_quota(
+            scope="user",
+            scope_key=str(user_model.id),
+            window_kind="day",
+            window_start=day_start,
+            call_cost=1,
+            cost_reserved_micros=8_000,
+        )
+        session.commit()
+        res_id = res.id
+        user_id = user_model.id
 
-    res = repo.create_reservation(
-        user_id=user_model.id,
-        request_id=uuid4(),
-        call_kind="generator",
-        provider="openrouter",
-        cost_reserved_micros=8_000,
-    )
-    repo.reserve_quota(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="day",
-        window_start=day_start,
-        call_cost=1,
-        cost_reserved_micros=8_000,
-    )
-    db_session.commit()
+    _, usage_svc = _build_test_service(pg_session_factory, FakePipelineProvider())
 
-    counter = repo.get_counter(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="day",
-        window_start=day_start,
-    )
-    assert counter.calls_reserved == 1
-    assert counter.cost_reserved_micros == 8_000
-
-    import threading
-
-    lock = threading.Lock()
+    barrier = threading.Barrier(2)
 
     def release_worker() -> None:
-        with lock:
-            usage_svc.release_reservation(reservation_id=res.id, user_id=user_model.id)
+        barrier.wait()
+        usage_svc.release_reservation(reservation_id=res_id, user_id=user_id)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         f1 = executor.submit(release_worker)
@@ -837,15 +889,22 @@ def test_10_concurrent_release_idempotency(
         f1.result()
         f2.result()
 
-    db_session.commit()
-    db_session.refresh(counter)
-    # Exactly one deduction across all counters
-    assert counter.calls_reserved == 0
-    assert counter.cost_reserved_micros == 0
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        counter = repo.get_counter(
+            scope="user",
+            scope_key=str(user_id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        # Exactly one deduction across all counters
+        assert counter.calls_reserved == 0
+        assert counter.cost_reserved_micros == 0
 
-    # Reservation state is released
-    db_session.refresh(res)
-    assert res.state == "released"
+        # Reservation state is released
+        r = repo.get_reservation_by_id(res_id)
+        assert r is not None
+        assert r.state == "released"
 
 
 def test_11_inactive_limit_dimensions_across_all_four_scope_window_pairs(
@@ -987,3 +1046,278 @@ def test_13_validation_error_max_bytes_truncates(
     assert len(huge_error) > 5000
     assert huge_error not in user_prompt
     assert "[truncated]" in user_prompt
+
+
+# -----------------------------------------------------------------------------
+# Reviewer Feedback Verification Suite (F1, F2, F3, S1, S2, N1)
+# -----------------------------------------------------------------------------
+
+
+def test_f1_window_binding_across_midnight_and_month_boundaries(
+    pg_session_factory: sessionmaker[Session],
+) -> None:
+    """F1: Settlement and release bind to reservation.created_at, not wall-clock time."""
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        repo = LlmUsageRepository(session)
+
+        # Simulate a reservation created on 2026-09-15 23:58:00 (old window)
+        old_time = datetime(2026, 9, 15, 23, 58, 0, tzinfo=UTC)
+        old_day = old_time.date()
+        old_month = old_day.replace(day=1)
+
+        req_id = uuid4()
+        res = repo.create_reservation(
+            user_id=user_model.id,
+            request_id=req_id,
+            call_kind="generator",
+            provider="openrouter",
+            cost_reserved_micros=10_000,
+            created_at=old_time,
+        )
+        # Pre-seed counters in old window
+        repo.reserve_quota(
+            scope="user",
+            scope_key=str(user_model.id),
+            window_kind="day",
+            window_start=old_day,
+            call_cost=1,
+            cost_reserved_micros=10_000,
+        )
+        repo.reserve_quota(
+            scope="user",
+            scope_key=str(user_model.id),
+            window_kind="month",
+            window_start=old_month,
+            call_cost=1,
+            cost_reserved_micros=10_000,
+        )
+        session.commit()
+        res_id = res.id
+        user_id = user_model.id
+
+    # Now wall-clock time is current (e.g. 2026-09-18)
+    today_day = datetime.now(UTC).date()
+
+    _, usage_svc = _build_test_service(pg_session_factory, FakePipelineProvider())
+
+    # Release the old reservation
+    usage_svc.release_reservation(reservation_id=res_id, user_id=user_id)
+
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        # Verify the old window counter was decremented
+        old_day_counter = repo.get_counter(
+            scope="user",
+            scope_key=str(user_id),
+            window_kind="day",
+            window_start=old_day,
+        )
+        assert old_day_counter is not None
+        assert old_day_counter.calls_reserved == 0
+        assert old_day_counter.cost_reserved_micros == 0
+
+        old_month_counter = repo.get_counter(
+            scope="user",
+            scope_key=str(user_id),
+            window_kind="month",
+            window_start=old_month,
+        )
+        assert old_month_counter is not None
+        assert old_month_counter.calls_reserved == 0
+        assert old_month_counter.cost_reserved_micros == 0
+
+        # Verify today's counters were NOT touched or created with negative values
+        today_counter = repo.get_counter(
+            scope="user",
+            scope_key=str(user_id),
+            window_kind="day",
+            window_start=today_day,
+        )
+        if today_day != old_day:
+            assert today_counter is None or today_counter.calls_reserved == 0
+
+
+def test_f2_wire_prompt_sizing_and_guard_max_tokens_cap(
+    pg_session_factory: sessionmaker[Session],
+) -> None:
+    """F2: Wire prompt size includes context/code, and guard output tokens are capped at 100."""
+    provider = FakePipelineProvider(
+        responses=[
+            LlmProviderResponse(text='{"safe": true}', model="guard", prompt_tokens=10, completion_tokens=5),
+            LlmProviderResponse(text='console.log("ok");', model="gen", prompt_tokens=20, completion_tokens=10),
+        ]
+    )
+    svc, _ = _build_test_service(pg_session_factory, provider)
+
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+
+    # Context and code
+    large_context = [LlmContextCell(kind="code", source="x" * 2000)]
+    req = GenerateRequest(
+        prompt="add logic",
+        context=large_context,
+        base_code="// previous code\nlet y = 10;",
+    )
+
+    res = svc.generate(req, current_user)
+    assert res.content == 'console.log("ok");'
+
+    # Check guard call: max_tokens must be guard_output_tokens_max (100), not 256
+    assert len(provider.calls) == 2
+    guard_call = provider.calls[0]
+    assert guard_call["max_tokens"] == 100
+
+
+def test_f3_entitlement_zero_limits_and_expiration(
+    pg_session_factory: sessionmaker[Session],
+) -> None:
+    """F3: daily=0 or monthly=0 is strictly preserved, and expired entitlement falls back."""
+    with pg_session_factory() as session:
+        user1, cur1 = _create_user(session)
+        user2, cur2 = _create_user(session)
+        user3, cur3 = _create_user(session)
+        repo = LlmUsageRepository(session)
+
+        # User 1: daily=0, monthly=None
+        repo.upsert_entitlement(
+            user_id=user1.id,
+            tier="developer",
+            daily_call_limit=0,
+            monthly_call_limit=None,
+        )
+        # User 2: daily=None, monthly=0
+        repo.upsert_entitlement(
+            user_id=user2.id,
+            tier="developer",
+            daily_call_limit=None,
+            monthly_call_limit=0,
+        )
+        # User 3: daily=0, but valid_until in the past (expired)
+        past_time = datetime(2020, 1, 1, tzinfo=UTC)
+        repo.upsert_entitlement(
+            user_id=user3.id,
+            tier="developer",
+            daily_call_limit=0,
+            monthly_call_limit=0,
+            valid_until=past_time,
+        )
+        session.commit()
+
+    _, usage_svc = _build_test_service(pg_session_factory, FakePipelineProvider())
+
+    with pg_session_factory() as session:
+        # Check user 1 limits: daily must be 0, not default!
+        d1, m1 = usage_svc.resolve_user_limits(user1.id, cur1.email, session)
+        assert d1 == 0
+        assert m1 == usage_svc.settings.llm_dev_tier_monthly_calls
+
+        # Check user 2 limits: monthly must be 0, not default!
+        d2, m2 = usage_svc.resolve_user_limits(user2.id, cur2.email, session)
+        assert d2 == usage_svc.settings.llm_dev_tier_daily_calls
+        assert m2 == 0
+
+        # Check user 3 limits: expired entitlement falls back to free tier defaults (not on dev allowlist)
+        d3, m3 = usage_svc.resolve_user_limits(user3.id, cur3.email, session)
+        assert d3 == usage_svc.settings.llm_free_tier_daily_calls
+        assert m3 == usage_svc.settings.llm_free_tier_monthly_calls
+
+    # Now verify that User 1 generation is refused with daily quota exceeded
+    provider = FakePipelineProvider()
+    svc, _ = _build_test_service(pg_session_factory, provider)
+    with pytest.raises(LlmQuotaExceededError) as exc_info:
+        svc.generate(GenerateRequest(prompt="hello"), cur1)
+    assert exc_info.value.scope == "user"
+    assert exc_info.value.window_kind == "day"
+
+    # User 2 generation is refused with monthly quota exceeded
+    with pytest.raises(LlmQuotaExceededError) as exc_info2:
+        svc.generate(GenerateRequest(prompt="hello"), cur2)
+    assert exc_info2.value.scope == "user"
+    assert exc_info2.value.window_kind == "month"
+
+
+def test_s1_provider_timeout_records_timeout_status(
+    pg_session_factory: sessionmaker[Session],
+) -> None:
+    """S1: Provider timeout causes status='timeout' and model_id=None on usage ledger."""
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+
+    class WrappedTimeoutError(Exception):
+        pass
+
+    timeout_exc = WrappedTimeoutError("Connection timed out")
+    timeout_exc.__cause__ = TimeoutError("Network timeout")
+
+    provider = FakePipelineProvider(
+        responses=[
+            LlmProviderResponse(text='{"safe": true}', model="guard", prompt_tokens=10, completion_tokens=5),
+            timeout_exc,
+        ]
+    )
+    svc, _ = _build_test_service(pg_session_factory, provider)
+
+    with pytest.raises(WrappedTimeoutError):
+        svc.generate(GenerateRequest(prompt="test timeout"), current_user)
+
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        events = repo.get_events_by_user_id(user_model.id)
+        generator_events = [e for e in events if e.call_kind == "generator"]
+        assert len(generator_events) == 1
+        assert generator_events[0].status == "timeout"
+        assert generator_events[0].model_id is None
+
+
+def test_s2_start_call_on_released_reservation_raises_error(
+    pg_session_factory: sessionmaker[Session],
+) -> None:
+    """S2: start_call on a reservation that was already released raises LlmServiceError."""
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        repo = LlmUsageRepository(session)
+        res = repo.create_reservation(
+            user_id=user_model.id,
+            request_id=uuid4(),
+            call_kind="generator",
+            provider="openrouter",
+            cost_reserved_micros=5000,
+        )
+        session.commit()
+        res_id = res.id
+
+    _, usage_svc = _build_test_service(pg_session_factory, FakePipelineProvider())
+
+    # Release it first
+    usage_svc.release_reservation(reservation_id=res_id, user_id=user_model.id)
+
+    # Now attempt to start it
+    provider = FakePipelineProvider()
+    with pytest.raises(LlmServiceError, match="Reservation cannot be started"):
+        usage_svc.start_call(
+            reservation_id=res_id,
+            provider=provider,
+            model_id="openrouter/free",
+            user_id=user_model.id,
+        )
+
+
+def test_n1_validation_error_truncation_exact_cap() -> None:
+    """N1: Truncation ensures the entire string including marker never exceeds max_bytes."""
+    max_bytes = 100
+    long_error = "Error: " + ("a" * 500)
+    truncated = _truncate_validation_error(long_error, max_bytes)
+    assert len(truncated.encode("utf-8")) <= max_bytes
+    assert truncated.endswith(" [truncated]")
+
+    # Short error remains unchanged
+    short_error = "SyntaxError: missing semicolon"
+    assert _truncate_validation_error(short_error, max_bytes) == short_error
+
+    # Multibyte unicode
+    unicode_error = "Ошибка: " + ("щ" * 200)
+    truncated_unicode = _truncate_validation_error(unicode_error, max_bytes)
+    assert len(truncated_unicode.encode("utf-8")) <= max_bytes
+    assert truncated_unicode.endswith(" [truncated]")

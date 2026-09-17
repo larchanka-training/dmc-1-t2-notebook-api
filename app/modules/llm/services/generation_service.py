@@ -61,6 +61,7 @@ class LlmGenerationService:
         usage_service: LlmUsageService | None = None,
         provider_name: str | None = None,
         validation_error_max_bytes: int | None = None,
+        guard_output_tokens_max: int | None = None,
     ) -> None:
         self.provider = provider
         self.syntax_validator = syntax_validator
@@ -75,6 +76,11 @@ class LlmGenerationService:
             validation_error_max_bytes
             if validation_error_max_bytes is not None
             else settings.llm_validation_error_max_bytes
+        )
+        self.guard_output_tokens_max = (
+            guard_output_tokens_max
+            if guard_output_tokens_max is not None
+            else settings.llm_guard_output_tokens_max
         )
 
     def generate(self, payload: GenerateRequest, user: CurrentUser) -> GenerateResponse:
@@ -94,12 +100,25 @@ class LlmGenerationService:
         gen_res_id: UUID | None = None
 
         if self.usage_service is not None:
-            prompt_bytes = len(payload.prompt.encode("utf-8"))
+            # Measure exact built user prompts for generator and guard
+            generator_user_prompt = _build_generation_prompt(
+                payload,
+                context_override=(
+                    _truncate_context_for_guard(payload)
+                    if result_kind == "text"
+                    else None
+                ),
+            )
+            generator_prompt_bytes = len(generator_user_prompt.encode("utf-8"))
+            guard_user_prompt = _build_guard_prompt(payload)
+            guard_prompt_bytes = len(guard_user_prompt.encode("utf-8"))
+
             guard_res_id, gen_res_id = self.usage_service.reserve_initial_generation(
                 user=user,
                 request_id=request_id,
                 provider=self.provider_name,
-                prompt_bytes=prompt_bytes,
+                prompt_bytes=generator_prompt_bytes,
+                guard_prompt_bytes=guard_prompt_bytes,
             )
 
         self._guard_prompt(payload, user, request_id, guard_res_id, gen_res_id)
@@ -172,18 +191,20 @@ class LlmGenerationService:
                 model_id=self.guard_model_id,
                 system_prompt=_guard_system_prompt(),
                 user_prompt=_build_guard_prompt(payload),
-                max_tokens=256,
+                max_tokens=self.guard_output_tokens_max,
                 temperature=0.0,
             )
             is_safe = parse_guard_json(guard_response.text)
         except Exception as exc:
             if self.usage_service is not None and guard_res_id is not None:
-                status = (
-                    "timeout"
-                    if isinstance(exc, (TimeoutError, LlmTimeoutError))
+                cause = getattr(exc, "__cause__", None)
+                is_timeout = (
+                    isinstance(exc, (TimeoutError, LlmTimeoutError))
+                    or (cause is not None and isinstance(cause, (TimeoutError, LlmTimeoutError)))
                     or "timeout" in type(exc).__name__.lower()
-                    else "provider_error"
+                    or (cause is not None and "timeout" in type(cause).__name__.lower())
                 )
+                status = "timeout" if is_timeout else "provider_error"
                 model_id = (
                     guard_response.model
                     if guard_response
@@ -277,12 +298,14 @@ class LlmGenerationService:
             )
         except Exception as exc:
             if self.usage_service is not None and gen_res_id is not None:
-                status = (
-                    "timeout"
-                    if isinstance(exc, (TimeoutError, LlmTimeoutError))
+                cause = getattr(exc, "__cause__", None)
+                is_timeout = (
+                    isinstance(exc, (TimeoutError, LlmTimeoutError))
+                    or (cause is not None and isinstance(cause, (TimeoutError, LlmTimeoutError)))
                     or "timeout" in type(exc).__name__.lower()
-                    else "provider_error"
+                    or (cause is not None and "timeout" in type(cause).__name__.lower())
                 )
+                status = "timeout" if is_timeout else "provider_error"
                 model_id = (
                     provider_response.model
                     if provider_response
@@ -372,12 +395,14 @@ class LlmGenerationService:
                 )
             except Exception as exc:
                 if self.usage_service is not None and repair_res_id is not None:
-                    status = (
-                        "timeout"
-                        if isinstance(exc, (TimeoutError, LlmTimeoutError))
+                    cause = getattr(exc, "__cause__", None)
+                    is_timeout = (
+                        isinstance(exc, (TimeoutError, LlmTimeoutError))
+                        or (cause is not None and isinstance(cause, (TimeoutError, LlmTimeoutError)))
                         or "timeout" in type(exc).__name__.lower()
-                        else "provider_error"
+                        or (cause is not None and "timeout" in type(cause).__name__.lower())
                     )
+                    status = "timeout" if is_timeout else "provider_error"
                     model_id = (
                         repair_response.model
                         if repair_response
@@ -538,12 +563,15 @@ def _infer_result_kind(payload: GenerateRequest) -> ResultKind:
 
 
 def _truncate_validation_error(error_text: str, max_bytes: int) -> str:
-    """Truncate validator error string to max_bytes, appending '[truncated]' if cut."""
+    """Truncate validator error string to max_bytes, ensuring total bytes <= max_bytes."""
     encoded = error_text.encode("utf-8")
     if len(encoded) <= max_bytes:
         return error_text
-    truncated = encoded[:max_bytes].decode("utf-8", errors="ignore")
-    return f"{truncated} [truncated]"
+    marker = " [truncated]"
+    marker_bytes = len(marker.encode("utf-8"))
+    target_bytes = max(0, max_bytes - marker_bytes)
+    truncated = encoded[:target_bytes].decode("utf-8", errors="ignore")
+    return f"{truncated}{marker}"
 
 
 def _extract_text(raw: str) -> str:
@@ -752,4 +780,5 @@ def build_generation_service(
         usage_service=usage_service,
         provider_name=settings.normalized_llm_provider,
         validation_error_max_bytes=settings.llm_validation_error_max_bytes,
+        guard_output_tokens_max=settings.llm_guard_output_tokens_max,
     )

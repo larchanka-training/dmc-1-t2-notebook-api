@@ -25,6 +25,7 @@ from app.modules.llm.services.errors import (
     CodeValidationError,
     LlmProviderNotConfiguredError,
     LlmQuotaExceededError,
+    LlmServiceError,
 )
 from app.modules.llm.services.provider import LlmProvider, LlmProviderResponse
 
@@ -67,7 +68,12 @@ class LlmUsageService:
     @staticmethod
     def get_window_dates(now: datetime | None = None) -> tuple[date, date]:
         """Return (utc_day_start, utc_month_start) for the current UTC instant."""
-        now_ts = now or datetime.now(UTC)
+        if now is None:
+            now_ts = datetime.now(UTC)
+        elif now.tzinfo is None:
+            now_ts = now.replace(tzinfo=UTC)
+        else:
+            now_ts = now.astimezone(UTC)
         day_start = now_ts.date()
         month_start = date(now_ts.year, now_ts.month, 1)
         return day_start, month_start
@@ -75,7 +81,12 @@ class LlmUsageService:
     @staticmethod
     def calculate_retry_after(window_kind: str, now: datetime | None = None) -> int:
         """Calculate seconds to the next UTC window boundary."""
-        now_ts = now or datetime.now(UTC)
+        if now is None:
+            now_ts = datetime.now(UTC)
+        elif now.tzinfo is None:
+            now_ts = now.replace(tzinfo=UTC)
+        else:
+            now_ts = now.astimezone(UTC)
         if window_kind == "day":
             tomorrow = datetime(now_ts.year, now_ts.month, now_ts.day, tzinfo=UTC) + timedelta(days=1)
             return max(1, int((tomorrow - now_ts).total_seconds()))
@@ -100,20 +111,27 @@ class LlmUsageService:
         if entitlement is not None:
             is_valid = entitlement.valid_until is None or entitlement.valid_until > now_ts
             if is_valid:
-                daily = entitlement.daily_call_limit
-                monthly = entitlement.monthly_call_limit
-                if daily is not None and monthly is not None:
-                    return daily, monthly
-                # Partial override falls back to tier default
-                if entitlement.tier == "developer":
-                    return (
-                        daily or self.settings.llm_dev_tier_daily_calls,
-                        monthly or self.settings.llm_dev_tier_monthly_calls,
-                    )
-                return (
-                    daily or self.settings.llm_free_tier_daily_calls,
-                    monthly or self.settings.llm_free_tier_monthly_calls,
+                tier_daily = (
+                    self.settings.llm_dev_tier_daily_calls
+                    if entitlement.tier == "developer"
+                    else self.settings.llm_free_tier_daily_calls
                 )
+                tier_monthly = (
+                    self.settings.llm_dev_tier_monthly_calls
+                    if entitlement.tier == "developer"
+                    else self.settings.llm_free_tier_monthly_calls
+                )
+                daily = (
+                    entitlement.daily_call_limit
+                    if entitlement.daily_call_limit is not None
+                    else tier_daily
+                )
+                monthly = (
+                    entitlement.monthly_call_limit
+                    if entitlement.monthly_call_limit is not None
+                    else tier_monthly
+                )
+                return daily, monthly
 
         normalized_email = (email or "").strip().lower()
         if normalized_email and normalized_email in self.settings.llm_allowed_email_set:
@@ -131,10 +149,15 @@ class LlmUsageService:
     # Cost Bound Calculations
     # -------------------------------------------------------------------------
 
-    def compute_guard_cost_bound(self) -> int:
+    def compute_guard_cost_bound(self, prompt_bytes: int | None = None) -> int:
         """Compute conservative upper-bound cost for the safety guard call."""
+        raw_bytes = (
+            prompt_bytes
+            if prompt_bytes is not None
+            else self.settings.llm_max_total_bytes
+        )
         input_tokens = (
-            prompt_tokens_estimate(self.settings.llm_max_total_bytes)
+            prompt_tokens_estimate(raw_bytes)
             + self.settings.llm_system_prompt_allowance_tokens
         )
         output_tokens = self.settings.llm_guard_output_tokens_max
@@ -185,6 +208,7 @@ class LlmUsageService:
         request_id: UUID,
         provider: str,
         prompt_bytes: int,
+        guard_prompt_bytes: int | None = None,
     ) -> tuple[UUID, UUID]:
         """Reserve quota for guard and generator calls (call_cost=2).
 
@@ -194,11 +218,12 @@ class LlmUsageService:
         Returns:
             (guard_reservation_id, generator_reservation_id)
         """
-        guard_bound = self.compute_guard_cost_bound()
+        guard_bound = self.compute_guard_cost_bound(guard_prompt_bytes)
         generator_bound = self.compute_generator_cost_bound(prompt_bytes)
         total_bound = guard_bound + generator_bound
 
-        day_start, month_start = self.get_window_dates()
+        now = datetime.now(UTC)
+        day_start, month_start = self.get_window_dates(now)
         user_id_str = str(user.id)
 
         with self.session_factory() as session:
@@ -290,6 +315,7 @@ class LlmUsageService:
                 call_kind="guard",
                 provider=provider,
                 cost_reserved_micros=guard_bound,
+                created_at=now,
             )
             gen_res = repo.create_reservation(
                 user_id=user.id,
@@ -297,6 +323,7 @@ class LlmUsageService:
                 call_kind="generator",
                 provider=provider,
                 cost_reserved_micros=generator_bound,
+                created_at=now,
             )
             session.commit()
             return guard_res.id, gen_res.id
@@ -315,7 +342,8 @@ class LlmUsageService:
         per §5.1 without returning invalid code.
         """
         repair_bound = self.compute_repair_cost_bound(repair_prompt)
-        day_start, month_start = self.get_window_dates()
+        now = datetime.now(UTC)
+        day_start, month_start = self.get_window_dates(now)
         user_id_str = str(user.id)
 
         with self.session_factory() as session:
@@ -390,6 +418,7 @@ class LlmUsageService:
                 call_kind="repair",
                 provider=provider,
                 cost_reserved_micros=repair_bound,
+                created_at=now,
             )
             session.commit()
             return repair_res.id
@@ -414,7 +443,14 @@ class LlmUsageService:
 
         with self.session_factory() as session:
             repo = LlmUsageRepository(session)
-            repo.transition_reservation_to_started(reservation_id)
+            started = repo.transition_reservation_to_started(reservation_id)
+            if not started:
+                session.rollback()
+                raise LlmServiceError(
+                    "Reservation cannot be started (already closed, released, or started)",
+                    code="llm_internal",
+                    status_code=500,
+                )
             session.commit()
 
     def settle_call(
@@ -434,7 +470,6 @@ class LlmUsageService:
         Evaluates token completeness: if complete and valid, settles the estimated cost.
         If error, timeout, or partial/missing usage tokens, retains full conservative bound.
         """
-        day_start, month_start = self.get_window_dates()
         user_id_str = str(user_id)
 
         with self.session_factory() as session:
@@ -443,6 +478,9 @@ class LlmUsageService:
             if res is None:
                 session.rollback()
                 return
+
+            # F1: Window dates are bound to the captured reservation instant!
+            day_start, month_start = self.get_window_dates(res.created_at)
 
             cost_reserved = res.cost_reserved_micros
             prompt_tokens = response.prompt_tokens if response else 0
@@ -503,11 +541,18 @@ class LlmUsageService:
 
     def release_reservation(self, *, reservation_id: UUID, user_id: UUID) -> None:
         """Atomically release an open 'reserved' reservation and decrement counters."""
-        day_start, month_start = self.get_window_dates()
         user_id_str = str(user_id)
 
         with self.session_factory() as session:
             repo = LlmUsageRepository(session)
+            res = repo.get_reservation_by_id(reservation_id)
+            if res is None:
+                session.rollback()
+                return
+
+            # F1: Window dates are bound to the captured reservation instant!
+            day_start, month_start = self.get_window_dates(res.created_at)
+
             # Step 1: Atomic state claim
             returned_bound = repo.transition_reservation_to_released(reservation_id)
             if returned_bound is None:

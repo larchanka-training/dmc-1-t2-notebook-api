@@ -93,4 +93,3 @@ class LlmQuotaExceededError(LlmServiceError):
         self.retry_after = max(1, retry_after)
         self.scope = scope
         self.window_kind = window_kind
-
