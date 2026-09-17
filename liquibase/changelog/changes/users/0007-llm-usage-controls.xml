@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <changeSet id="users-0007-llm-usage-controls" author="msd">
+        <comment>
+            TARDIS: LLM usage controls schema (Step 8e-1).
+            Adds users.llm_usage_event (append-only ledger of provider calls),
+            users.llm_usage_reservation (in-flight state machine per call),
+            users.llm_usage_counter (quota enforcement windows: daily/monthly, user/global),
+            and users.llm_entitlement (per-user tier and limit overrides).
+        </comment>
+        <sql>
+            CREATE TABLE IF NOT EXISTS users.llm_usage_event (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id uuid NOT NULL REFERENCES users.users(id) ON DELETE CASCADE,
+                request_id uuid NOT NULL,
+                reservation_id uuid NOT NULL,
+                call_kind text NOT NULL CHECK (call_kind IN ('guard', 'generator', 'repair')),
+                provider text NOT NULL CHECK (provider IN ('openrouter', 'bedrock')),
+                model_id text,
+                status text NOT NULL CHECK (status IN ('ok', 'provider_error', 'timeout', 'unknown')),
+                prompt_tokens integer NOT NULL DEFAULT 0 CHECK (prompt_tokens >= 0),
+                completion_tokens integer NOT NULL DEFAULT 0 CHECK (completion_tokens >= 0),
+                estimated_cost_micros bigint NOT NULL DEFAULT 0 CHECK (estimated_cost_micros >= 0),
+                created_at timestamptz NOT NULL DEFAULT now()
+            );
+
+            CREATE INDEX IF NOT EXISTS llm_usage_event_user_created_idx
+                ON users.llm_usage_event(user_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS llm_usage_event_request_idx
+                ON users.llm_usage_event(request_id);
+
+            CREATE INDEX IF NOT EXISTS llm_usage_event_reservation_idx
+                ON users.llm_usage_event(reservation_id);
+
+            CREATE TABLE IF NOT EXISTS users.llm_usage_reservation (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id uuid NOT NULL REFERENCES users.users(id) ON DELETE CASCADE,
+                request_id uuid NOT NULL,
+                call_kind text NOT NULL CHECK (call_kind IN ('guard', 'generator', 'repair')),
+                provider text NOT NULL CHECK (provider IN ('openrouter', 'bedrock')),
+                state text NOT NULL CHECK (state IN ('reserved', 'started', 'settled', 'released', 'unknown')),
+                cost_reserved_micros bigint NOT NULL CHECK (cost_reserved_micros >= 0),
+                created_at timestamptz NOT NULL DEFAULT now(),
+                started_at timestamptz,
+                closed_at timestamptz
+            );
+
+            CREATE INDEX IF NOT EXISTS llm_usage_reservation_state_created_idx
+                ON users.llm_usage_reservation(state, created_at);
+
+            CREATE INDEX IF NOT EXISTS llm_usage_reservation_request_idx
+                ON users.llm_usage_reservation(request_id);
+
+            CREATE INDEX IF NOT EXISTS llm_usage_reservation_user_idx
+                ON users.llm_usage_reservation(user_id);
+
+            CREATE TABLE IF NOT EXISTS users.llm_usage_counter (
+                scope text NOT NULL CHECK (scope IN ('user', 'global')),
+                scope_key text NOT NULL,
+                window_kind text NOT NULL CHECK (window_kind IN ('day', 'month')),
+                window_start date NOT NULL,
+                calls_reserved integer NOT NULL DEFAULT 0 CHECK (calls_reserved >= 0),
+                calls_settled integer NOT NULL DEFAULT 0 CHECK (calls_settled >= 0),
+                cost_reserved_micros bigint NOT NULL DEFAULT 0 CHECK (cost_reserved_micros >= 0),
+                cost_micros bigint NOT NULL DEFAULT 0 CHECK (cost_micros >= 0),
+                PRIMARY KEY (scope, scope_key, window_kind, window_start)
+            );
+
+            CREATE TABLE IF NOT EXISTS users.llm_entitlement (
+                user_id uuid PRIMARY KEY REFERENCES users.users(id) ON DELETE CASCADE,
+                tier text NOT NULL CHECK (tier IN ('free', 'developer', 'paid')),
+                daily_call_limit integer CHECK (daily_call_limit IS NULL OR daily_call_limit >= 0),
+                monthly_call_limit integer CHECK (monthly_call_limit IS NULL OR monthly_call_limit >= 0),
+                valid_until timestamptz,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now()
+            );
+        </sql>
+
+        <rollback>
+            <sql>
+                DROP TABLE IF EXISTS users.llm_entitlement;
+                DROP TABLE IF EXISTS users.llm_usage_counter;
+                DROP TABLE IF EXISTS users.llm_usage_reservation;
+                DROP TABLE IF EXISTS users.llm_usage_event;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
