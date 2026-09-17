@@ -565,7 +565,7 @@ def test_reservation_state_transitions_refresh_retained_instance(
         user_id=user.id,
         request_id=uuid4(),
         call_kind="generator",
-        provider="openai",
+        provider="openrouter",
         cost_reserved_micros=5_000,
     )
     assert res.state == "reserved"
