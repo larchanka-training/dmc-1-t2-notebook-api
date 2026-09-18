@@ -564,12 +564,16 @@ def _infer_result_kind(payload: GenerateRequest) -> ResultKind:
 
 def _truncate_validation_error(error_text: str, max_bytes: int) -> str:
     """Truncate validator error string to max_bytes, ensuring total bytes <= max_bytes."""
+    if max_bytes <= 0:
+        return ""
     encoded = error_text.encode("utf-8")
     if len(encoded) <= max_bytes:
         return error_text
     marker = " [truncated]"
     marker_bytes = len(marker.encode("utf-8"))
-    target_bytes = max(0, max_bytes - marker_bytes)
+    if max_bytes < marker_bytes:
+        return encoded[:max_bytes].decode("utf-8", errors="ignore")
+    target_bytes = max_bytes - marker_bytes
     truncated = encoded[:target_bytes].decode("utf-8", errors="ignore")
     return f"{truncated}{marker}"
 

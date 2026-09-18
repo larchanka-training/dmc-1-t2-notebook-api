@@ -605,24 +605,38 @@ A new code, distinct from the existing limiter:
 | quota exhausted (new) | 429 | `llm_quota_exceeded` | seconds to the next UTC window boundary |
 
 They must not share a code. "Wait a minute" and "you are done until tomorrow" are
-different instructions, and the UI already keys off `error.code`. The response says
-which window was exhausted (`day` / `month`) and whether it was the user's or the
-deployment's — the latter without disclosing global numbers.
+different instructions, and the UI keys off `error.code`.
 
-When quota is exhausted, the endpoint responds with HTTP 429 and payload:
+When quota is exhausted, the endpoint responds with HTTP 429, the standard error
+envelope matching `ApiErrorEnvelope`, and the `Retry-After` header indicating seconds
+to the next window boundary:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 7200
+Content-Type: application/json
+```
+
 ```json
 {
-  "error": "llm_quota_exceeded",
-  "message": "Daily generation quota exhausted. Resets at midnight UTC.",
-  "scope": "user",
-  "window_kind": "day",
-  "retry_after": 7200
+  "error": {
+    "code": "llm_quota_exceeded",
+    "message": "Daily generation quota exhausted. Resets at midnight UTC.",
+    "fields": {}
+  }
 }
 ```
-Along with the `Retry-After: <seconds>` HTTP response header.
 
-When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
-`ui/openapi/llm.openapi.yaml` update.
+The error message indicates whether the daily or monthly limit was reached.
+Machine-readable retry timing is communicated via the standard `Retry-After` HTTP
+header rather than custom JSON body fields.
+
+In Step 8e-2, this error code is implemented in the backend API router with HTTP 429
+status code and `Retry-After` header. The OpenAPI spec describes the 429 response.
+Companion UI error handling (distinguishing `rate_limited` from `llm_quota_exceeded`
+in user-facing toasts or dialogs, and consuming `ui/openapi/llm.openapi.yaml`) will be
+synchronized in the UI submodule as part of the frontend roadmap prior to monorepo
+promotion.
 
 ## 9. Usage view
 

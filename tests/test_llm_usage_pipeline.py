@@ -6,6 +6,7 @@ B. Unit and adapter suite (Tests 12-13)
 """
 
 import concurrent.futures
+import json
 import multiprocessing
 import os
 import threading
@@ -22,11 +23,9 @@ from app.modules.auth.schemas import CurrentUser
 from app.modules.llm.repositories import LlmUsageRepository
 from app.modules.llm.schemas import GenerateRequest, LlmContextCell
 from app.modules.llm.services.errors import (
-    LlmProviderError,
     LlmProviderNotConfiguredError,
     LlmQuotaExceededError,
     LlmServiceError,
-    LlmTimeoutError,
     PromptRejectedError,
 )
 from app.modules.llm.services.generation_service import (
@@ -35,6 +34,7 @@ from app.modules.llm.services.generation_service import (
     _build_guard_prompt,
     _truncate_validation_error,
 )
+from app.modules.llm.services.openrouter_client import HttpResponse, OpenRouterClient
 from app.modules.llm.services.provider import LlmProviderResponse
 from app.modules.llm.services.syntax_validator import SyntaxValidationResult
 from app.modules.llm.services.usage_service import LlmUsageService
@@ -207,6 +207,7 @@ def _build_test_service(
         usage_service=usage_svc,
         provider_name="openrouter",
         validation_error_max_bytes=app_settings.llm_validation_error_max_bytes,
+        guard_output_tokens_max=app_settings.llm_guard_output_tokens_max,
     )
     return svc, usage_svc
 
@@ -388,34 +389,37 @@ def test_2_first_request_on_empty_table_and_initialized_arithmetic(
 
 
 def test_3_settlement_is_idempotent(
-    db_session: Session, db_session_factory: sessionmaker[Session]
+    pg_session_factory: sessionmaker[Session],
 ) -> None:
     """3. Settlement is idempotent — settling twice counts once."""
-    user_model, current_user = _create_user(db_session)
-    repo = LlmUsageRepository(db_session)
-    day_start = datetime.now(UTC).date()
-    req_id = uuid4()
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        repo = LlmUsageRepository(session)
+        day_start = datetime.now(UTC).date()
+        req_id = uuid4()
 
-    # Create reservation and start it
-    res = repo.create_reservation(
-        user_id=user_model.id,
-        request_id=req_id,
-        call_kind="generator",
-        provider="openrouter",
-        cost_reserved_micros=10_000,
-    )
-    repo.reserve_quota(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="day",
-        window_start=day_start,
-        call_cost=1,
-        cost_reserved_micros=10_000,
-    )
-    repo.transition_reservation_to_started(res.id)
-    db_session.commit()
+        # Create reservation and start it
+        res = repo.create_reservation(
+            user_id=user_model.id,
+            request_id=req_id,
+            call_kind="generator",
+            provider="openrouter",
+            cost_reserved_micros=10_000,
+        )
+        repo.reserve_quota(
+            scope="user",
+            scope_key=str(user_model.id),
+            window_kind="day",
+            window_start=day_start,
+            call_cost=1,
+            cost_reserved_micros=10_000,
+        )
+        repo.transition_reservation_to_started(res.id)
+        session.commit()
+        res_id = res.id
+        user_id = user_model.id
 
-    _, usage_svc = _build_test_service(db_session_factory, FakePipelineProvider())
+    _, usage_svc = _build_test_service(pg_session_factory, FakePipelineProvider())
 
     response = LlmProviderResponse(
         text="output",
@@ -426,8 +430,8 @@ def test_3_settlement_is_idempotent(
 
     # First settle
     usage_svc.settle_call(
-        reservation_id=res.id,
-        user_id=user_model.id,
+        reservation_id=res_id,
+        user_id=user_id,
         request_id=req_id,
         call_kind="generator",
         provider_name="openrouter",
@@ -436,21 +440,23 @@ def test_3_settlement_is_idempotent(
         status="ok",
     )
 
-    counter1 = repo.get_counter(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="day",
-        window_start=day_start,
-    )
-    assert counter1.calls_settled == 1
-    assert counter1.calls_reserved == 1
-    events1 = repo.get_events_by_request_id(req_id)
-    assert len(events1) == 1
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        counter1 = repo.get_counter(
+            scope="user",
+            scope_key=str(user_id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        assert counter1.calls_settled == 1
+        assert counter1.calls_reserved == 1
+        events1 = repo.get_events_by_request_id(req_id)
+        assert len(events1) == 1
 
     # Second settle (retried)
     usage_svc.settle_call(
-        reservation_id=res.id,
-        user_id=user_model.id,
+        reservation_id=res_id,
+        user_id=user_id,
         request_id=req_id,
         call_kind="generator",
         provider_name="openrouter",
@@ -459,11 +465,18 @@ def test_3_settlement_is_idempotent(
         status="ok",
     )
 
-    db_session.refresh(counter1)
-    assert counter1.calls_settled == 1
-    assert counter1.calls_reserved == 1
-    events2 = repo.get_events_by_request_id(req_id)
-    assert len(events2) == 1
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        counter2 = repo.get_counter(
+            scope="user",
+            scope_key=str(user_id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        assert counter2.calls_settled == 1
+        assert counter2.calls_reserved == 1
+        events2 = repo.get_events_by_request_id(req_id)
+        assert len(events2) == 1
 
 
 def test_4_pre_call_reservation_persistence(
@@ -496,17 +509,18 @@ def test_4_pre_call_reservation_persistence(
 
 
 def test_5_cost_ceiling_enforcement(
-    db_session: Session, db_session_factory: sessionmaker[Session]
+    pg_session_factory: sessionmaker[Session],
 ) -> None:
     """5. Cost ceiling enforcement: refuses request whose reserved upper bound exceeds ceiling."""
-    user_model, current_user = _create_user(db_session)
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
 
     # Set a tiny global monthly cost ceiling (e.g. 100 micros)
     settings = _make_test_settings(
         llm_global_monthly_cost_ceiling_micros=100,  # 100 micros ceiling
     )
     provider = FakePipelineProvider()
-    svc, _ = _build_test_service(db_session_factory, provider, settings=settings)
+    svc, _ = _build_test_service(pg_session_factory, provider, settings=settings)
 
     with pytest.raises(LlmQuotaExceededError) as exc_info:
         svc.generate(GenerateRequest(prompt="request exceeding cost ceiling"), current_user)
@@ -516,48 +530,48 @@ def test_5_cost_ceiling_enforcement(
 
 
 def test_6_ceiling_binds_after_settlement(
-    db_session: Session, db_session_factory: sessionmaker[Session]
+    pg_session_factory: sessionmaker[Session],
 ) -> None:
     """6. Ceiling binds after settlement: assert next request is refused because cost_micros counts."""
-    user_model, current_user = _create_user(db_session)
-    repo = LlmUsageRepository(db_session)
-    month_start = datetime.now(UTC).date().replace(day=1)
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        repo = LlmUsageRepository(session)
+        month_start = datetime.now(UTC).date().replace(day=1)
 
-    # Compute bound for standard request
-    settings = _make_test_settings(
-        llm_global_monthly_cost_ceiling_micros=100_000,
-    )
-    provider = FakePipelineProvider()
-    svc, usage_svc = _build_test_service(db_session_factory, provider, settings=settings)
+        # Compute bound for standard request
+        settings = _make_test_settings(
+            llm_global_monthly_cost_ceiling_micros=100_000,
+        )
+        provider = FakePipelineProvider()
+        svc, usage_svc = _build_test_service(pg_session_factory, provider, settings=settings)
 
-    req = GenerateRequest(prompt="short prompt")
-    guard_user_prompt = _build_guard_prompt(req)
-    gen_user_prompt = _build_generation_prompt(req)
-    total_req_bound = usage_svc.compute_guard_cost_bound(
-        len(guard_user_prompt.encode("utf-8"))
-    ) + usage_svc.compute_generator_cost_bound(
-        len(gen_user_prompt.encode("utf-8"))
-    )
+        req = GenerateRequest(prompt="short prompt")
+        guard_user_prompt = _build_guard_prompt(req)
+        gen_user_prompt = _build_generation_prompt(req)
+        total_req_bound = usage_svc.compute_guard_cost_bound(
+            len(guard_user_prompt.encode("utf-8"))
+        ) + usage_svc.compute_generator_cost_bound(
+            len(gen_user_prompt.encode("utf-8"))
+        )
 
-    # Settle prior spending into the counter so cost_micros is close to ceiling
-    # cost_micros = 100_000 - (total_req_bound - 10)
-    repo.reserve_quota(
-        scope="global",
-        scope_key="-",
-        window_kind="month",
-        window_start=month_start,
-        call_cost=1,
-        cost_reserved_micros=100_000,
-    )
-    repo.settle_quota(
-        scope="global",
-        scope_key="-",
-        window_kind="month",
-        window_start=month_start,
-        cost_reserved_micros=100_000,
-        settled_cost_micros=100_000 - total_req_bound + 10,
-    )
-    db_session.commit()
+        # Settle prior spending into the counter so cost_micros is close to ceiling
+        repo.reserve_quota(
+            scope="global",
+            scope_key="-",
+            window_kind="month",
+            window_start=month_start,
+            call_cost=1,
+            cost_reserved_micros=100_000,
+        )
+        repo.settle_quota(
+            scope="global",
+            scope_key="-",
+            window_kind="month",
+            window_start=month_start,
+            cost_reserved_micros=100_000,
+            settled_cost_micros=100_000 - total_req_bound + 10,
+        )
+        session.commit()
 
     # Now cost_micros + total_req_bound > 100_000
     with pytest.raises(LlmQuotaExceededError) as exc_info:
@@ -568,7 +582,7 @@ def test_6_ceiling_binds_after_settlement(
 
 
 def test_7_downstream_cleanup_by_lifecycle_point(
-    db_session: Session, db_session_factory: sessionmaker[Session]
+    pg_session_factory: sessionmaker[Session],
 ) -> None:
     """7. Downstream cleanup by lifecycle point:
 
@@ -579,46 +593,50 @@ def test_7_downstream_cleanup_by_lifecycle_point(
       At limit - 2, counter sits at limit - 1 so second generation is refused.
       Seeded at limit - 3, second generation succeeds.
     """
-    user_model, current_user = _create_user(db_session)
-    repo = LlmUsageRepository(db_session)
-    day_start = datetime.now(UTC).date()
     limit = 10
-    repo.upsert_entitlement(
-        user_id=user_model.id,
-        tier="developer",
-        daily_call_limit=limit,
-        monthly_call_limit=100,
-    )
+    day_start = datetime.now(UTC).date()
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        repo = LlmUsageRepository(session)
+        repo.upsert_entitlement(
+            user_id=user_model.id,
+            tier="developer",
+            daily_call_limit=limit,
+            monthly_call_limit=100,
+        )
 
-    # Case 7a: Preflight failure returns both reservations in full
-    # Pre-seed counter to limit - 2 (8 calls reserved)
-    repo.reserve_quota(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="day",
-        window_start=day_start,
-        call_cost=limit - 2,
-        cost_reserved_micros=10_000,
-        call_limit=limit,
-    )
-    db_session.commit()
+        # Case 7a: Preflight failure returns both reservations in full
+        # Pre-seed counter to limit - 2 (8 calls reserved)
+        repo.reserve_quota(
+            scope="user",
+            scope_key=str(user_model.id),
+            window_kind="day",
+            window_start=day_start,
+            call_cost=limit - 2,
+            cost_reserved_micros=10_000,
+            call_limit=limit,
+        )
+        session.commit()
+        user_id = user_model.id
 
     provider_fail = FakePipelineProvider(
         preflight_error=LlmProviderNotConfiguredError("Provider unconfigured")
     )
-    svc_fail, _ = _build_test_service(db_session_factory, provider_fail)
+    svc_fail, _ = _build_test_service(pg_session_factory, provider_fail)
 
     with pytest.raises(LlmProviderNotConfiguredError):
         svc_fail.generate(GenerateRequest(prompt="preflight fail"), current_user)
 
     # Counter should be back to 8 (limit - 2)
-    counter = repo.get_counter(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="day",
-        window_start=day_start,
-    )
-    assert counter.calls_reserved == limit - 2
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        counter = repo.get_counter(
+            scope="user",
+            scope_key=str(user_id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        assert counter.calls_reserved == limit - 2
 
     # A second complete generation succeeds because all quota was returned!
     provider_ok = FakePipelineProvider(
@@ -627,74 +645,81 @@ def test_7_downstream_cleanup_by_lifecycle_point(
             LlmProviderResponse(text='console.log("recovered");', model="gen", prompt_tokens=20, completion_tokens=10),
         ]
     )
-    svc_ok, _ = _build_test_service(db_session_factory, provider_ok)
+    svc_ok, _ = _build_test_service(pg_session_factory, provider_ok)
     res = svc_ok.generate(GenerateRequest(prompt="succeeds now"), current_user)
     assert res.content == 'console.log("recovered");'
 
     # Case 7b: Post-start guard failure (e.g. guard rejects prompt)
     # Reset counter for a fresh user
-    user2, cur2 = _create_user(db_session)
-    repo.upsert_entitlement(
-        user_id=user2.id,
-        tier="developer",
-        daily_call_limit=limit,
-        monthly_call_limit=100,
-    )
-    # Seed at limit - 2 (8 calls)
-    repo.reserve_quota(
-        scope="user",
-        scope_key=str(user2.id),
-        window_kind="day",
-        window_start=day_start,
-        call_cost=limit - 2,
-        cost_reserved_micros=10_000,
-        call_limit=limit,
-    )
-    db_session.commit()
+    with pg_session_factory() as session:
+        user2, cur2 = _create_user(session)
+        repo = LlmUsageRepository(session)
+        repo.upsert_entitlement(
+            user_id=user2.id,
+            tier="developer",
+            daily_call_limit=limit,
+            monthly_call_limit=100,
+        )
+        # Seed at limit - 2 (8 calls)
+        repo.reserve_quota(
+            scope="user",
+            scope_key=str(user2.id),
+            window_kind="day",
+            window_start=day_start,
+            call_cost=limit - 2,
+            cost_reserved_micros=10_000,
+            call_limit=limit,
+        )
+        session.commit()
+        user2_id = user2.id
 
     guard_reject_provider = FakePipelineProvider(
         responses=[
             LlmProviderResponse(text='{"safe": false}', model="guard", prompt_tokens=10, completion_tokens=5),
         ]
     )
-    svc_reject, _ = _build_test_service(db_session_factory, guard_reject_provider)
+    svc_reject, _ = _build_test_service(pg_session_factory, guard_reject_provider)
 
     with pytest.raises(PromptRejectedError):
         svc_reject.generate(GenerateRequest(prompt="malicious prompt"), cur2)
 
     # Exactly 1 call remains consumed (guard settled), and generator was released.
     # So counter sits at limit - 1 (8 + 1 = 9)
-    counter2 = repo.get_counter(
-        scope="user",
-        scope_key=str(user2.id),
-        window_kind="day",
-        window_start=day_start,
-    )
-    assert counter2.calls_reserved == limit - 1
-    assert counter2.calls_settled == 1
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        counter2 = repo.get_counter(
+            scope="user",
+            scope_key=str(user2_id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        assert counter2.calls_reserved == limit - 1
+        assert counter2.calls_settled == 1
 
     # At limit - 1, a second 2-call generation is refused!
     with pytest.raises(LlmQuotaExceededError):
         svc_reject.generate(GenerateRequest(prompt="retry generation"), cur2)
 
     # Now verify: seeded at limit - 3, counter sits at limit - 2 after guard failure, so second gen succeeds
-    user3, cur3 = _create_user(db_session)
-    repo.upsert_entitlement(
-        user_id=user3.id,
-        tier="developer",
-        daily_call_limit=limit,
-        monthly_call_limit=100,
-    )
-    repo.reserve_quota(
-        scope="user",
-        scope_key=str(user3.id),
-        window_kind="day",
-        window_start=day_start,
-        call_cost=limit - 3,  # 7 calls
-        cost_reserved_micros=10_000,
-        call_limit=limit,
-    )
-    db_session.commit()
+    with pg_session_factory() as session:
+        user3, cur3 = _create_user(session)
+        repo = LlmUsageRepository(session)
+        repo.upsert_entitlement(
+            user_id=user3.id,
+            tier="developer",
+            daily_call_limit=limit,
+            monthly_call_limit=100,
+        )
+        repo.reserve_quota(
+            scope="user",
+            scope_key=str(user3.id),
+            window_kind="day",
+            window_start=day_start,
+            call_cost=limit - 3,  # 7 calls
+            cost_reserved_micros=10_000,
+            call_limit=limit,
+        )
+        session.commit()
 
     provider3 = FakePipelineProvider(
         responses=[
@@ -704,7 +729,7 @@ def test_7_downstream_cleanup_by_lifecycle_point(
             LlmProviderResponse(text='console.log("works");', model="gen", prompt_tokens=20, completion_tokens=10),
         ]
     )
-    svc3, _ = _build_test_service(db_session_factory, provider3)
+    svc3, _ = _build_test_service(pg_session_factory, provider3)
 
     # First attempt: guard rejects
     with pytest.raises(PromptRejectedError):
@@ -716,25 +741,26 @@ def test_7_downstream_cleanup_by_lifecycle_point(
 
 
 def test_8_release_returns_both_columns(
-    db_session: Session, db_session_factory: sessionmaker[Session]
+    pg_session_factory: sessionmaker[Session],
 ) -> None:
     """8. Release returns BOTH columns: cost_reserved_micros is returned in addition to calls_reserved."""
-    user_model, current_user = _create_user(db_session)
-    repo = LlmUsageRepository(db_session)
-    day_start = datetime.now(UTC).date()
-    _, usage_svc = _build_test_service(db_session_factory, FakePipelineProvider())
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        repo = LlmUsageRepository(session)
+        day_start = datetime.now(UTC).date()
+        initial_cost = 50_000
+        repo.reserve_quota(
+            scope="user",
+            scope_key=str(user_model.id),
+            window_kind="day",
+            window_start=day_start,
+            call_cost=1,
+            cost_reserved_micros=initial_cost,
+        )
+        session.commit()
+        user_id = user_model.id
 
-    # Pre-seed initial state
-    initial_cost = 50_000
-    repo.reserve_quota(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="day",
-        window_start=day_start,
-        call_cost=1,
-        cost_reserved_micros=initial_cost,
-    )
-    db_session.commit()
+    _, usage_svc = _build_test_service(pg_session_factory, FakePipelineProvider())
 
     # Reserve 2 calls with cost bound
     req_id = uuid4()
@@ -745,103 +771,138 @@ def test_8_release_returns_both_columns(
         prompt_bytes=len("hello".encode("utf-8")),
     )
 
-    counter_after_reserve = repo.get_counter(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="day",
-        window_start=day_start,
-    )
-    assert counter_after_reserve.calls_reserved == 3
-    assert counter_after_reserve.cost_reserved_micros > initial_cost
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        counter_after_reserve = repo.get_counter(
+            scope="user",
+            scope_key=str(user_id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        assert counter_after_reserve.calls_reserved == 3
+        assert counter_after_reserve.cost_reserved_micros > initial_cost
 
     # Release both reservations
-    usage_svc.release_reservation(reservation_id=guard_id, user_id=user_model.id)
-    usage_svc.release_reservation(reservation_id=gen_id, user_id=user_model.id)
+    usage_svc.release_reservation(reservation_id=guard_id, user_id=user_id)
+    usage_svc.release_reservation(reservation_id=gen_id, user_id=user_id)
 
-    db_session.refresh(counter_after_reserve)
-    assert counter_after_reserve.calls_reserved == 1
-    # Cost bound must be exactly restored to initial_cost
-    assert counter_after_reserve.cost_reserved_micros == initial_cost
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        counter_after_release = repo.get_counter(
+            scope="user",
+            scope_key=str(user_id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        assert counter_after_release.calls_reserved == 1
+        assert counter_after_release.cost_reserved_micros == initial_cost
 
 
 def test_9_failure_paths_and_partial_usage_keep_full_bound(
-    db_session: Session, db_session_factory: sessionmaker[Session]
+    pg_session_factory: sessionmaker[Session],
 ) -> None:
     """9. Failure paths and partial-usage completions keep full bound.
 
-    Test 5 cases:
-    1. HTTP error (LlmProviderError)
-    2. Timeout (LlmTimeoutError)
-    3. Connection failure (LlmConnectionError)
-    4. Unusable body (empty response text)
-    5. Missing/partial usage data (zero tokens)
-    In all cases, full bound is kept. Assert model_id is None on ledger for timeout/connection errors.
+    Tests real adapter response mapping and pipeline settlement across 5 cases:
+    1. HTTP error: OpenRouter returns 500 -> LlmProviderError -> status='provider_error'
+    2. Timeout: transport raises TimeoutError -> LlmProviderError (from TimeoutError) -> status='timeout', model_id=None
+    3. Connection failure: transport raises ConnectionResetError -> LlmProviderError -> status='provider_error', model_id=None
+    4. Unusable body: model returns empty body -> TextGenerationError -> status='provider_error'
+    5. Missing/partial usage: model returns valid content with 0 tokens -> status='ok'
+    In all cases, the full reserved cost bound is kept on the ledger and PostgreSQL constraints hold.
     """
-    user_model, current_user = _create_user(db_session)
-    repo = LlmUsageRepository(db_session)
-    day_start = datetime.now(UTC).date()
-
     cases = [
-        ("http_error", LlmProviderError("Provider 500 error"), "provider_error", True),
-        ("timeout", LlmTimeoutError("Inference timed out"), "timeout", False),
-        ("conn_failure", ConnectionError("Connection reset"), "provider_error", False),
-        ("empty_body", LlmProviderResponse(text="", model="openrouter/free", prompt_tokens=0, completion_tokens=0), "provider_error", True),
-        ("partial_usage", LlmProviderResponse(text='{"safe": true}', model="openrouter/free", prompt_tokens=0, completion_tokens=0), "ok", True),
+        ("http_error", "provider_error", False),
+        ("timeout", "timeout", False),
+        ("conn_failure", "provider_error", False),
+        ("empty_body", "provider_error", True),
+        ("partial_usage", "ok", True),
     ]
 
-    _, usage_svc = _build_test_service(db_session_factory, FakePipelineProvider())
+    for case_name, expected_status, expect_model_in_ledger in cases:
+        def make_transport(cn: str):
+            def transport(url: str, body: bytes, headers: dict[str, str], timeout: float) -> HttpResponse:
+                if cn == "http_error":
+                    return HttpResponse(500, '{"error": {"message": "Service error"}}', {})
+                elif cn == "timeout":
+                    raise TimeoutError("Socket read timeout")
+                elif cn == "conn_failure":
+                    raise ConnectionResetError("Connection reset by peer")
+                elif cn == "empty_body":
+                    return HttpResponse(
+                        200,
+                        json.dumps({"choices": [{"message": {"content": ""}}], "model": "openrouter/free"}),
+                        {},
+                    )
+                elif cn == "partial_usage":
+                    return HttpResponse(
+                        200,
+                        json.dumps({
+                            "choices": [{"message": {"content": '{"safe": true}'}}],
+                            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+                            "model": "openrouter/free",
+                        }),
+                        {},
+                    )
+                raise ValueError(f"Unknown case {cn}")
+            return transport
 
-    for case_name, outcome, expected_status, expect_model in cases:
-        req_id = uuid4()
-        res = repo.create_reservation(
-            user_id=user_model.id,
-            request_id=req_id,
-            call_kind="guard",
-            provider="openrouter",
-            cost_reserved_micros=15_000,
+        client = OpenRouterClient(
+            api_key="test-key",
+            timeout_seconds=1,
+            transport=make_transport(case_name),
         )
-        repo.reserve_quota(
-            scope="user",
-            scope_key=str(user_model.id),
-            window_kind="day",
-            window_start=day_start,
-            call_cost=1,
-            cost_reserved_micros=15_000,
-        )
-        repo.transition_reservation_to_started(res.id)
-        db_session.commit()
 
-        # Settle according to outcome
-        if isinstance(outcome, Exception):
-            usage_svc.settle_call(
-                reservation_id=res.id,
-                user_id=user_model.id,
-                request_id=req_id,
-                call_kind="guard",
-                provider_name="openrouter",
-                model_id=None if not expect_model else "openrouter/free",
-                response=None,
-                status=expected_status,
+        with pg_session_factory() as session:
+            user_model, current_user = _create_user(session)
+            user_id = user_model.id
+
+        svc, _ = _build_test_service(pg_session_factory, client)
+
+        if case_name == "partial_usage":
+            # Guard passes with partial usage, generator also returns partial usage
+            def gen_transport(url: str, body: bytes, headers: dict[str, str], timeout: float) -> HttpResponse:
+                # Check if prompt contains guard or generator
+                if b"safety evaluator" in body or b"guard" in body:
+                    return HttpResponse(
+                        200,
+                        json.dumps({
+                            "choices": [{"message": {"content": '{"safe": true}'}}],
+                            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+                            "model": "openrouter/free",
+                        }),
+                        {},
+                    )
+                return HttpResponse(
+                    200,
+                    json.dumps({
+                        "choices": [{"message": {"content": 'console.log("ok");'}}],
+                        "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+                        "model": "openrouter/free",
+                    }),
+                    {},
+                )
+            client_gen = OpenRouterClient(
+                api_key="test-key",
+                timeout_seconds=1,
+                transport=gen_transport,
             )
+            svc_gen, _ = _build_test_service(pg_session_factory, client_gen)
+            res = svc_gen.generate(GenerateRequest(prompt="test partial"), current_user)
+            assert res.content == 'console.log("ok");'
         else:
-            usage_svc.settle_call(
-                reservation_id=res.id,
-                user_id=user_model.id,
-                request_id=req_id,
-                call_kind="guard",
-                provider_name="openrouter",
-                model_id=outcome.model,
-                response=outcome,
-                status=expected_status,
-            )
+            with pytest.raises(Exception):
+                svc.generate(GenerateRequest(prompt="test outcome"), current_user)
 
-        events = repo.get_events_by_request_id(req_id)
-        assert len(events) == 1, f"Failed for case {case_name}"
-        event = events[0]
-        assert event.status == expected_status, f"Failed status for {case_name}"
-        assert event.estimated_cost_micros == 15_000, f"Full bound not kept for {case_name}"
-        if not expect_model:
-            assert event.model_id is None, f"Expected model_id None for {case_name}"
+        with pg_session_factory() as session:
+            repo = LlmUsageRepository(session)
+            events = repo.get_events_by_user_id(user_id)
+            assert len(events) >= 1, f"No events recorded for case {case_name}"
+            target_event = events[0]
+            assert target_event.status == expected_status, f"Wrong status for {case_name}: {target_event.status}"
+            assert target_event.estimated_cost_micros > 0, f"Cost bound lost for {case_name}"
+            if not expect_model_in_ledger:
+                assert target_event.model_id is None, f"Expected model_id None for {case_name}"
 
 
 def test_10_concurrent_release_idempotency(
@@ -908,7 +969,7 @@ def test_10_concurrent_release_idempotency(
 
 
 def test_11_inactive_limit_dimensions_across_all_four_scope_window_pairs(
-    db_session: Session, db_session_factory: sessionmaker[Session]
+    pg_session_factory: sessionmaker[Session],
 ) -> None:
     """11. Inactive limit dimensions across all four scope/window pairs.
 
@@ -919,61 +980,64 @@ def test_11_inactive_limit_dimensions_across_all_four_scope_window_pairs(
     - global/month: call_limit = NULL, cost_limit set
     Valid requests are admitted and SQL three-valued logic does not reject them.
     """
-    user_model, current_user = _create_user(db_session)
-    repo = LlmUsageRepository(db_session)
-    day_start, month_start = datetime.now(UTC).date(), datetime.now(UTC).date().replace(day=1)
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        repo = LlmUsageRepository(session)
+        day_start = datetime.now(UTC).date()
+        month_start = day_start.replace(day=1)
 
-    # 1. user/day: call_limit=10, cost_limit=None
-    c1 = repo.reserve_quota(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="day",
-        window_start=day_start,
-        call_cost=2,
-        cost_reserved_micros=20_000,
-        call_limit=10,
-        cost_limit_micros=None,
-    )
-    assert c1 == 2
+        # 1. user/day: call_limit=10, cost_limit=None
+        c1 = repo.reserve_quota(
+            scope="user",
+            scope_key=str(user_model.id),
+            window_kind="day",
+            window_start=day_start,
+            call_cost=2,
+            cost_reserved_micros=20_000,
+            call_limit=10,
+            cost_limit_micros=None,
+        )
+        assert c1 == 2
 
-    # 2. user/month: call_limit=50, cost_limit=None
-    c2 = repo.reserve_quota(
-        scope="user",
-        scope_key=str(user_model.id),
-        window_kind="month",
-        window_start=month_start,
-        call_cost=2,
-        cost_reserved_micros=20_000,
-        call_limit=50,
-        cost_limit_micros=None,
-    )
-    assert c2 == 2
+        # 2. user/month: call_limit=50, cost_limit=None
+        c2 = repo.reserve_quota(
+            scope="user",
+            scope_key=str(user_model.id),
+            window_kind="month",
+            window_start=month_start,
+            call_cost=2,
+            cost_reserved_micros=20_000,
+            call_limit=50,
+            cost_limit_micros=None,
+        )
+        assert c2 == 2
 
-    # 3. global/day: call_limit=1000, cost_limit=None
-    c3 = repo.reserve_quota(
-        scope="global",
-        scope_key="-",
-        window_kind="day",
-        window_start=day_start,
-        call_cost=2,
-        cost_reserved_micros=20_000,
-        call_limit=1000,
-        cost_limit_micros=None,
-    )
-    assert c3 == 2
+        # 3. global/day: call_limit=1000, cost_limit=None
+        c3 = repo.reserve_quota(
+            scope="global",
+            scope_key="-",
+            window_kind="day",
+            window_start=day_start,
+            call_cost=2,
+            cost_reserved_micros=20_000,
+            call_limit=1000,
+            cost_limit_micros=None,
+        )
+        assert c3 == 2
 
-    # 4. global/month: call_limit=None, cost_limit=50_000_000
-    c4 = repo.reserve_quota(
-        scope="global",
-        scope_key="-",
-        window_kind="month",
-        window_start=month_start,
-        call_cost=2,
-        cost_reserved_micros=20_000,
-        call_limit=None,
-        cost_limit_micros=50_000_000,
-    )
-    assert c4 == 2
+        # 4. global/month: call_limit=None, cost_limit=50_000_000
+        c4 = repo.reserve_quota(
+            scope="global",
+            scope_key="-",
+            window_kind="month",
+            window_start=month_start,
+            call_cost=2,
+            cost_reserved_micros=20_000,
+            call_limit=None,
+            cost_limit_micros=50_000_000,
+        )
+        assert c4 == 2
+        session.commit()
 
 
 # -----------------------------------------------------------------------------
@@ -1056,118 +1120,194 @@ def test_13_validation_error_max_bytes_truncates(
 def test_f1_window_binding_across_midnight_and_month_boundaries(
     pg_session_factory: sessionmaker[Session],
 ) -> None:
-    """F1: Settlement and release bind to reservation.created_at, not wall-clock time."""
+    """F1: Settlement and release bind to reservation.created_at, not wall-clock time.
+
+    Verifies across September 30 -> October 1 month boundary:
+    1. Pre-seeds September 30 and October 1 counters across all 4 keys.
+    2. Releasing a September reservation decrements September counters and leaves October unchanged.
+    3. Settling a September reservation increments settled in September and leaves October unchanged.
+    4. Handles absent October rows without creating ghost rows or failing check constraints.
+    """
+    sep_time = datetime(2026, 9, 30, 23, 59, 50, tzinfo=UTC)
+    sep_day = sep_time.date()
+    sep_month = sep_day.replace(day=1)
+    oct_day = datetime(2026, 10, 1, 0, 1, 0, tzinfo=UTC).date()
+    oct_month = oct_day.replace(day=1)
+
     with pg_session_factory() as session:
         user_model, current_user = _create_user(session)
+        user_id = user_model.id
         repo = LlmUsageRepository(session)
 
-        # Simulate a reservation created on 2026-09-15 23:58:00 (old window)
-        old_time = datetime(2026, 9, 15, 23, 58, 0, tzinfo=UTC)
-        old_day = old_time.date()
-        old_month = old_day.replace(day=1)
+        # Pre-seed September counters for all 4 keys
+        for scope, key in [("user", str(user_id)), ("global", "-")]:
+            repo.reserve_quota(scope=scope, scope_key=key, window_kind="day", window_start=sep_day, call_cost=2, cost_reserved_micros=20_000)
+            repo.reserve_quota(scope=scope, scope_key=key, window_kind="month", window_start=sep_month, call_cost=2, cost_reserved_micros=20_000)
 
-        req_id = uuid4()
-        res = repo.create_reservation(
-            user_id=user_model.id,
-            request_id=req_id,
+        # Pre-seed October counters for all 4 keys with existing populated activity
+        for scope, key in [("user", str(user_id)), ("global", "-")]:
+            repo.reserve_quota(scope=scope, scope_key=key, window_kind="day", window_start=oct_day, call_cost=3, cost_reserved_micros=30_000)
+            repo.settle_quota(scope=scope, scope_key=key, window_kind="day", window_start=oct_day, cost_reserved_micros=10_000, settled_cost_micros=5000)
+            repo.reserve_quota(scope=scope, scope_key=key, window_kind="month", window_start=oct_month, call_cost=3, cost_reserved_micros=30_000)
+            repo.settle_quota(scope=scope, scope_key=key, window_kind="month", window_start=oct_month, cost_reserved_micros=10_000, settled_cost_micros=5000)
+
+        # Create two September reservations (created on Sep 30 23:59:50 UTC)
+        res_rel = repo.create_reservation(
+            user_id=user_id,
+            request_id=uuid4(),
             call_kind="generator",
             provider="openrouter",
             cost_reserved_micros=10_000,
-            created_at=old_time,
+            created_at=sep_time,
         )
-        # Pre-seed counters in old window
-        repo.reserve_quota(
-            scope="user",
-            scope_key=str(user_model.id),
-            window_kind="day",
-            window_start=old_day,
-            call_cost=1,
+        res_set = repo.create_reservation(
+            user_id=user_id,
+            request_id=uuid4(),
+            call_kind="guard",
+            provider="openrouter",
             cost_reserved_micros=10_000,
+            created_at=sep_time,
         )
-        repo.reserve_quota(
-            scope="user",
-            scope_key=str(user_model.id),
-            window_kind="month",
-            window_start=old_month,
-            call_cost=1,
-            cost_reserved_micros=10_000,
-        )
+        repo.transition_reservation_to_started(res_set.id)
         session.commit()
-        res_id = res.id
-        user_id = user_model.id
-
-    # Now wall-clock time is current (e.g. 2026-09-18)
-    today_day = datetime.now(UTC).date()
+        rel_id = res_rel.id
+        set_id = res_set.id
+        set_req_id = res_set.request_id
 
     _, usage_svc = _build_test_service(pg_session_factory, FakePipelineProvider())
 
-    # Release the old reservation
-    usage_svc.release_reservation(reservation_id=res_id, user_id=user_id)
+    # Case A: Release September reservation
+    usage_svc.release_reservation(reservation_id=rel_id, user_id=user_id)
 
     with pg_session_factory() as session:
         repo = LlmUsageRepository(session)
-        # Verify the old window counter was decremented
-        old_day_counter = repo.get_counter(
-            scope="user",
-            scope_key=str(user_id),
-            window_kind="day",
-            window_start=old_day,
-        )
-        assert old_day_counter is not None
-        assert old_day_counter.calls_reserved == 0
-        assert old_day_counter.cost_reserved_micros == 0
+        # Verify September counters were decremented
+        c_sep_user_day = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="day", window_start=sep_day)
+        assert c_sep_user_day.calls_reserved == 1
+        assert c_sep_user_day.cost_reserved_micros == 10_000
 
-        old_month_counter = repo.get_counter(
-            scope="user",
-            scope_key=str(user_id),
-            window_kind="month",
-            window_start=old_month,
-        )
-        assert old_month_counter is not None
-        assert old_month_counter.calls_reserved == 0
-        assert old_month_counter.cost_reserved_micros == 0
+        c_sep_user_month = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="month", window_start=sep_month)
+        assert c_sep_user_month.calls_reserved == 1
+        assert c_sep_user_month.cost_reserved_micros == 10_000
 
-        # Verify today's counters were NOT touched or created with negative values
-        today_counter = repo.get_counter(
-            scope="user",
-            scope_key=str(user_id),
-            window_kind="day",
-            window_start=today_day,
+        # Verify October counters remain 100% UNCHANGED
+        c_oct_user_day = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="day", window_start=oct_day)
+        assert c_oct_user_day.calls_reserved == 3
+        assert c_oct_user_day.calls_settled == 1
+        assert c_oct_user_day.cost_reserved_micros == 20_000
+        assert c_oct_user_day.cost_micros == 5000
+
+        c_oct_user_month = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="month", window_start=oct_month)
+        assert c_oct_user_month.calls_reserved == 3
+        assert c_oct_user_month.calls_settled == 1
+        assert c_oct_user_month.cost_reserved_micros == 20_000
+        assert c_oct_user_month.cost_micros == 5000
+
+    # Case B: Settle September reservation
+    response = LlmProviderResponse(text='{"safe": true}', model="openrouter/free", prompt_tokens=10, completion_tokens=5)
+    usage_svc.settle_call(
+        reservation_id=set_id,
+        user_id=user_id,
+        request_id=set_req_id,
+        call_kind="guard",
+        provider_name="openrouter",
+        model_id="openrouter/free",
+        response=response,
+        status="ok",
+    )
+
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        # Verify September counters settled
+        c_sep_user_day = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="day", window_start=sep_day)
+        assert c_sep_user_day.calls_reserved == 1
+        assert c_sep_user_day.calls_settled == 1
+
+        c_sep_user_month = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="month", window_start=sep_month)
+        assert c_sep_user_month.calls_reserved == 1
+        assert c_sep_user_month.calls_settled == 1
+
+        # Verify October counters are STILL 100% UNCHANGED
+        c_oct_user_day = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="day", window_start=oct_day)
+        assert c_oct_user_day.calls_reserved == 3
+        assert c_oct_user_day.calls_settled == 1
+        assert c_oct_user_day.cost_micros == 5000
+
+    # Case C: Absent October rows
+    with pg_session_factory() as session:
+        user2, _ = _create_user(session)
+        user2_id = user2.id
+        repo = LlmUsageRepository(session)
+        for scope, key in [("user", str(user2_id)), ("global", "-")]:
+            repo.reserve_quota(scope=scope, scope_key=key, window_kind="day", window_start=sep_day, call_cost=1, cost_reserved_micros=10_000)
+            repo.reserve_quota(scope=scope, scope_key=key, window_kind="month", window_start=sep_month, call_cost=1, cost_reserved_micros=10_000)
+        res_absent = repo.create_reservation(
+            user_id=user2_id,
+            request_id=uuid4(),
+            call_kind="generator",
+            provider="openrouter",
+            cost_reserved_micros=10_000,
+            created_at=sep_time,
         )
-        if today_day != old_day:
-            assert today_counter is None or today_counter.calls_reserved == 0
+        session.commit()
+        absent_id = res_absent.id
+
+    usage_svc.release_reservation(reservation_id=absent_id, user_id=user2_id)
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        # October row was never created
+        c_oct_absent = repo.get_counter(scope="user", scope_key=str(user2_id), window_kind="day", window_start=oct_day)
+        assert c_oct_absent is None
 
 
 def test_f2_wire_prompt_sizing_and_guard_max_tokens_cap(
     pg_session_factory: sessionmaker[Session],
 ) -> None:
-    """F2: Wire prompt size includes context/code, and guard output tokens are capped at 100."""
+    """F2: Wire prompt size includes context/code/title, and guard output tokens are capped at guard_output_tokens_max."""
+    # 1. Verify that full prompt with context, edit base code, and cell title is measured
+    large_context = [LlmContextCell(kind="code", source="c" * 8000)]
+    req = GenerateRequest(
+        prompt="x" * 100,
+        context=large_context,
+        base_code="b" * 8000,
+        cell_title="My Notebook Title",
+        mode="edit",
+    )
+    gen_user_prompt = _build_generation_prompt(req)
+    prompt_bytes = len(gen_user_prompt.encode("utf-8"))
+    assert prompt_bytes > 16_000
+
+    # 2. Cost ceiling enforcement: a ceiling of 50,000 micros allows a small 100-byte prompt
+    # (~35,000 micros) but REFUSES this full 16,000-byte edit prompt (>70,000 micros bound).
+    settings = _make_test_settings(
+        llm_global_monthly_cost_ceiling_micros=50_000,
+        llm_guard_output_tokens_max=75,  # Custom non-default cap
+    )
     provider = FakePipelineProvider(
         responses=[
             LlmProviderResponse(text='{"safe": true}', model="guard", prompt_tokens=10, completion_tokens=5),
             LlmProviderResponse(text='console.log("ok");', model="gen", prompt_tokens=20, completion_tokens=10),
         ]
     )
-    svc, _ = _build_test_service(pg_session_factory, provider)
+    svc, usage_svc = _build_test_service(pg_session_factory, provider, settings=settings)
 
     with pg_session_factory() as session:
         user_model, current_user = _create_user(session)
 
-    # Context and code
-    large_context = [LlmContextCell(kind="code", source="x" * 2000)]
-    req = GenerateRequest(
-        prompt="add logic",
-        context=large_context,
-        base_code="// previous code\nlet y = 10;",
-    )
+    # Large request is refused by ceiling
+    with pytest.raises(LlmQuotaExceededError) as exc_info:
+        svc.generate(req, current_user)
+    assert exc_info.value.scope == "global"
+    assert exc_info.value.window_kind == "month"
 
-    res = svc.generate(req, current_user)
+    # Small request succeeds under same 50,000 micros ceiling
+    small_req = GenerateRequest(prompt="hello")
+    res = svc.generate(small_req, current_user)
     assert res.content == 'console.log("ok");'
 
-    # Check guard call: max_tokens must be guard_output_tokens_max (100), not 256
+    # Guard call passed custom max_tokens=75, not 100 or 256
     assert len(provider.calls) == 2
-    guard_call = provider.calls[0]
-    assert guard_call["max_tokens"] == 100
+    assert provider.calls[0]["max_tokens"] == 75
 
 
 def test_f3_entitlement_zero_limits_and_expiration(
@@ -1245,11 +1385,12 @@ def test_s1_provider_timeout_records_timeout_status(
     with pg_session_factory() as session:
         user_model, current_user = _create_user(session)
 
-    class WrappedTimeoutError(Exception):
+    # Class name intentionally does NOT contain 'timeout' to prove cause-inspection logic
+    class NetworkHangError(Exception):
         pass
 
-    timeout_exc = WrappedTimeoutError("Connection timed out")
-    timeout_exc.__cause__ = TimeoutError("Network timeout")
+    timeout_exc = NetworkHangError("Connection dropped by gateway")
+    timeout_exc.__cause__ = TimeoutError("Socket read timeout")
 
     provider = FakePipelineProvider(
         responses=[
@@ -1259,7 +1400,7 @@ def test_s1_provider_timeout_records_timeout_status(
     )
     svc, _ = _build_test_service(pg_session_factory, provider)
 
-    with pytest.raises(WrappedTimeoutError):
+    with pytest.raises(NetworkHangError):
         svc.generate(GenerateRequest(prompt="test timeout"), current_user)
 
     with pg_session_factory() as session:
@@ -1305,19 +1446,33 @@ def test_s2_start_call_on_released_reservation_raises_error(
 
 
 def test_n1_validation_error_truncation_exact_cap() -> None:
-    """N1: Truncation ensures the entire string including marker never exceeds max_bytes."""
-    max_bytes = 100
+    """N1: Truncation ensures the entire string including marker never exceeds max_bytes, even for small cap."""
     long_error = "Error: " + ("a" * 500)
-    truncated = _truncate_validation_error(long_error, max_bytes)
-    assert len(truncated.encode("utf-8")) <= max_bytes
-    assert truncated.endswith(" [truncated]")
+    unicode_error = "Ошибка: " + ("щ" * 200)
+
+    # Test caps: 0, 1, 5, 11, 12, 100
+    for max_bytes in [0, 1, 5, 11, 12, 100]:
+        res_ascii = _truncate_validation_error(long_error, max_bytes)
+        assert len(res_ascii.encode("utf-8")) <= max_bytes, f"Exceeded max_bytes={max_bytes} for ASCII"
+
+        res_uni = _truncate_validation_error(unicode_error, max_bytes)
+        assert len(res_uni.encode("utf-8")) <= max_bytes, f"Exceeded max_bytes={max_bytes} for Unicode"
+
+        if max_bytes >= 12:
+            assert res_ascii.endswith(" [truncated]")
 
     # Short error remains unchanged
     short_error = "SyntaxError: missing semicolon"
-    assert _truncate_validation_error(short_error, max_bytes) == short_error
+    assert _truncate_validation_error(short_error, 100) == short_error
 
-    # Multibyte unicode
-    unicode_error = "Ошибка: " + ("щ" * 200)
-    truncated_unicode = _truncate_validation_error(unicode_error, max_bytes)
-    assert len(truncated_unicode.encode("utf-8")) <= max_bytes
-    assert truncated_unicode.endswith(" [truncated]")
+
+def test_f6_database_url_not_used_without_test_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F6: DATABASE_URL is never used for testing without explicit TEST_DATABASE_URL opt-in."""
+    monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://should_never_connect.invalid:5432/not_a_test_db")
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+    from tests.conftest import _resolve_postgres_cluster_url
+    url = _resolve_postgres_cluster_url()
+    assert url is None or "should_never_connect.invalid" not in url

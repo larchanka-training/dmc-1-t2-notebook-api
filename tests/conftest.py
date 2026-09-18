@@ -6,8 +6,10 @@ import tempfile
 import time
 from collections.abc import Generator
 from datetime import UTC, datetime
+from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 from uuid import UUID, uuid4
+import xml.etree.ElementTree as ET
 
 import psycopg2
 import pytest
@@ -183,27 +185,56 @@ CREATE TABLE IF NOT EXISTS users.llm_entitlement (
 """
 
 
-@pytest.fixture(scope="session")
-def postgres_cluster_url() -> Generator[str | None, None, None]:
-    """Provide a running PostgreSQL cluster URL, starting an ephemeral one if needed."""
-    env_url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
-    if env_url and ("postgres" in env_url):
-        yield env_url
-        return
-
-    for candidate in [
-        "postgresql://postgres:postgrespassword@127.0.0.1:5432/postgres",
-        "postgresql://postgres@127.0.0.1:5432/postgres",
-        "postgresql://postgres@localhost:5432/postgres",
-    ]:
+def load_migration_0007_sql() -> str:
+    """Load SQL from Liquibase changeset 0007-llm-usage-controls.xml if available."""
+    xml_path = Path(__file__).parent.parent / "liquibase" / "changelog" / "changes" / "users" / "0007-llm-usage-controls.xml"
+    if xml_path.exists():
         try:
-            conn = psycopg2.connect(candidate, connect_timeout=1)
-            conn.close()
-            yield candidate
-            return
+            tree = ET.parse(xml_path)
+            for elem in tree.iter():
+                if elem.tag.endswith("sql") and "CREATE TABLE" in (elem.text or ""):
+                    return elem.text.strip()
         except Exception:
             pass
+    return MIGRATION_0007_SQL.strip()
 
+
+def _resolve_postgres_cluster_url() -> str | None:
+    """Resolve PostgreSQL cluster URL exclusively from explicit TEST_DATABASE_URL.
+
+    F6 Invariant:
+    DATABASE_URL is explicitly NEVER used for test discovery or test database provisioning.
+    Guessed local addresses (e.g. localhost:5432) are NEVER probed without explicit opt-in.
+    """
+    env_url = os.environ.get("TEST_DATABASE_URL")
+    if env_url and ("postgres" in env_url):
+        return env_url
+    return None
+
+
+@pytest.fixture(scope="session")
+def postgres_cluster_url() -> Generator[str | None, None, None]:
+    """Provide a running PostgreSQL cluster URL, strictly from TEST_DATABASE_URL or ephemeral cluster.
+
+    Safety:
+    1. If TEST_DATABASE_URL is set, use it.
+    2. In CI, if TEST_DATABASE_URL is missing, raise RuntimeError immediately.
+    3. In local dev without TEST_DATABASE_URL, spin up an isolated ephemeral cluster on a random port
+       if initdb and pg_ctl are present, verifying clean shutdown before directory cleanup.
+    4. Otherwise yield None (tests will skip explicitly with a clear message).
+    """
+    url = _resolve_postgres_cluster_url()
+    if url:
+        yield url
+        return
+
+    # In CI, PostgreSQL is strictly mandatory for the test suite
+    if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+        raise RuntimeError(
+            "TEST_DATABASE_URL environment variable is required in CI environment"
+        )
+
+    # Local developer fallback: ephemeral cluster on random port
     initdb = shutil.which("initdb")
     pg_ctl = shutil.which("pg_ctl")
     if initdb and pg_ctl:
@@ -228,8 +259,10 @@ def postgres_cluster_url() -> Generator[str | None, None, None]:
             time.sleep(0.3)
             yield f"postgresql://postgres@127.0.0.1:{port}/postgres"
         finally:
-            subprocess.run([pg_ctl, "-D", pg_dir, "-m", "immediate", "stop"], capture_output=True)
-            shutil.rmtree(pg_dir, ignore_errors=True)
+            # S3: Verify successful stop before deleting directory
+            stop_res = subprocess.run([pg_ctl, "-D", pg_dir, "-m", "immediate", "stop"], capture_output=True)
+            if stop_res.returncode == 0:
+                shutil.rmtree(pg_dir, ignore_errors=True)
         return
 
     yield None
@@ -239,62 +272,67 @@ def postgres_cluster_url() -> Generator[str | None, None, None]:
 def pg_session_factory(postgres_cluster_url: str | None) -> Generator[sessionmaker[Session], None, None]:
     """Provision an isolated disposable database for PostgreSQL tests with real constraints."""
     if not postgres_cluster_url:
-        pytest.skip("PostgreSQL is not available in environment")
+        pytest.skip("PostgreSQL is not configured (set TEST_DATABASE_URL to run PostgreSQL tests)")
 
+    disposable_db = f"jsnb_test_{uuid4().hex[:10]}"
     admin_conn = psycopg2.connect(postgres_cluster_url)
     admin_conn.autocommit = True
     cur = admin_conn.cursor()
-    disposable_db = f"jsnb_test_{uuid4().hex[:10]}"
     cur.execute(f'CREATE DATABASE "{disposable_db}";')
     cur.close()
     admin_conn.close()
 
     parsed = urlparse(postgres_cluster_url)
     db_url = urlunparse(parsed._replace(path=f"/{disposable_db}"))
+    engine = None
 
-    conn = psycopg2.connect(db_url)
-    conn.autocommit = True
-    c = conn.cursor()
-    c.execute("CREATE SCHEMA IF NOT EXISTS users;")
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users.users (
-            id uuid PRIMARY KEY,
-            email text NOT NULL,
-            display_name text,
-            created_at timestamptz NOT NULL DEFAULT now()
-        );
-    """)
-    c.execute(MIGRATION_0007_SQL)
-    c.close()
-    conn.close()
-
-    engine = create_engine(
-        db_url.replace("postgresql://", "postgresql+psycopg2://"),
-        pool_size=10,
-        max_overflow=20,
-        future=True,
-    )
-    factory = sessionmaker(
-        bind=engine,
-        autoflush=False,
-        autocommit=False,
-        expire_on_commit=False,
-        class_=Session,
-    )
-    setattr(factory, "db_url", db_url)
-
+    # S3: Register cleanup immediately after database creation in try/finally
     try:
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = True
+        c = conn.cursor()
+        c.execute("CREATE SCHEMA IF NOT EXISTS users;")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS users.users (
+                id uuid PRIMARY KEY,
+                email text NOT NULL,
+                display_name text,
+                created_at timestamptz NOT NULL DEFAULT now()
+            );
+        """)
+        c.execute(load_migration_0007_sql())
+        c.close()
+        conn.close()
+
+        engine = create_engine(
+            db_url.replace("postgresql://", "postgresql+psycopg2://"),
+            pool_size=10,
+            max_overflow=20,
+            future=True,
+        )
+        factory = sessionmaker(
+            bind=engine,
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+            class_=Session,
+        )
+        setattr(factory, "db_url", db_url)
         yield factory
     finally:
-        engine.dispose()
-        admin_conn = psycopg2.connect(postgres_cluster_url)
-        admin_conn.autocommit = True
-        cur = admin_conn.cursor()
-        cur.execute(f"""
-            SELECT pg_terminate_backend(pid)
-            FROM pg_stat_activity
-            WHERE datname = '{disposable_db}' AND pid <> pg_backend_pid();
-        """)
-        cur.execute(f'DROP DATABASE IF EXISTS "{disposable_db}";')
-        cur.close()
-        admin_conn.close()
+        if engine is not None:
+            engine.dispose()
+        try:
+            admin_conn = psycopg2.connect(postgres_cluster_url)
+            admin_conn.autocommit = True
+            cur = admin_conn.cursor()
+            cur.execute(f"""
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname = '{disposable_db}' AND pid <> pg_backend_pid();
+            """)
+            cur.execute(f'DROP DATABASE IF EXISTS "{disposable_db}";')
+            cur.close()
+            admin_conn.close()
+        except Exception:
+            pass
