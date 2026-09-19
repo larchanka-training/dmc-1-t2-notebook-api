@@ -798,8 +798,21 @@ def test_8_release_returns_both_columns(
         assert counter_after_release.cost_reserved_micros == initial_cost
 
 
+@pytest.mark.parametrize(
+    "case_name, expected_status, expect_model_in_ledger",
+    [
+        ("http_error", "provider_error", False),
+        ("timeout", "timeout", False),
+        ("conn_failure", "provider_error", False),
+        ("empty_body", "provider_error", False),
+        ("partial_usage", "ok", True),
+    ],
+)
 def test_9_failure_paths_and_partial_usage_keep_full_bound(
     pg_session_factory: sessionmaker[Session],
+    case_name: str,
+    expected_status: str,
+    expect_model_in_ledger: bool,
 ) -> None:
     """9. Failure paths and partial-usage completions keep full bound.
 
@@ -811,98 +824,148 @@ def test_9_failure_paths_and_partial_usage_keep_full_bound(
     5. Missing/partial usage: model returns valid content with 0 tokens -> status='ok'
     In all cases, the full reserved cost bound is kept on the ledger and PostgreSQL constraints hold.
     """
-    cases = [
-        ("http_error", "provider_error", False),
-        ("timeout", "timeout", False),
-        ("conn_failure", "provider_error", False),
-        ("empty_body", "provider_error", True),
-        ("partial_usage", "ok", True),
-    ]
-
-    for case_name, expected_status, expect_model_in_ledger in cases:
-        def make_transport(cn: str):
-            def transport(url: str, body: bytes, headers: dict[str, str], timeout: float) -> HttpResponse:
-                if cn == "http_error":
-                    return HttpResponse(500, '{"error": {"message": "Service error"}}', {})
-                elif cn == "timeout":
-                    raise TimeoutError("Socket read timeout")
-                elif cn == "conn_failure":
-                    raise ConnectionResetError("Connection reset by peer")
-                elif cn == "empty_body":
-                    return HttpResponse(
-                        200,
-                        json.dumps({"choices": [{"message": {"content": ""}}], "model": "openrouter/free"}),
-                        {},
-                    )
-                elif cn == "partial_usage":
-                    return HttpResponse(
-                        200,
-                        json.dumps({
-                            "choices": [{"message": {"content": '{"safe": true}'}}],
-                            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-                            "model": "openrouter/free",
-                        }),
-                        {},
-                    )
-                raise ValueError(f"Unknown case {cn}")
-            return transport
-
-        client = OpenRouterClient(
-            api_key="test-key",
-            timeout_seconds=1,
-            transport=make_transport(case_name),
-        )
-
-        with pg_session_factory() as session:
-            user_model, current_user = _create_user(session)
-            user_id = user_model.id
-
-        svc, _ = _build_test_service(pg_session_factory, client)
-
-        if case_name == "partial_usage":
-            # Guard passes with partial usage, generator also returns partial usage
-            def gen_transport(url: str, body: bytes, headers: dict[str, str], timeout: float) -> HttpResponse:
-                # Check if prompt contains guard or generator
-                if b"safety evaluator" in body or b"guard" in body:
-                    return HttpResponse(
-                        200,
-                        json.dumps({
-                            "choices": [{"message": {"content": '{"safe": true}'}}],
-                            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-                            "model": "openrouter/free",
-                        }),
-                        {},
-                    )
+    def make_transport(cn: str):
+        def transport(url: str, body: bytes, headers: dict[str, str], timeout: float) -> HttpResponse:
+            if cn == "http_error":
+                return HttpResponse(500, '{"error": {"message": "Service error"}}', {})
+            elif cn == "timeout":
+                raise TimeoutError("Socket read timeout")
+            elif cn == "conn_failure":
+                raise ConnectionResetError("Connection reset by peer")
+            elif cn == "empty_body":
+                return HttpResponse(
+                    200,
+                    json.dumps({"choices": [{"message": {"content": ""}}], "model": "openrouter/free"}),
+                    {},
+                )
+            elif cn == "partial_usage":
                 return HttpResponse(
                     200,
                     json.dumps({
-                        "choices": [{"message": {"content": 'console.log("ok");'}}],
+                        "choices": [{"message": {"content": '{"safe": true}'}}],
                         "usage": {"prompt_tokens": 0, "completion_tokens": 0},
                         "model": "openrouter/free",
                     }),
                     {},
                 )
-            client_gen = OpenRouterClient(
-                api_key="test-key",
-                timeout_seconds=1,
-                transport=gen_transport,
-            )
-            svc_gen, _ = _build_test_service(pg_session_factory, client_gen)
-            res = svc_gen.generate(GenerateRequest(prompt="test partial"), current_user)
-            assert res.content == 'console.log("ok");'
-        else:
-            with pytest.raises(Exception):
-                svc.generate(GenerateRequest(prompt="test outcome"), current_user)
+            raise ValueError(f"Unknown case {cn}")
+        return transport
 
-        with pg_session_factory() as session:
-            repo = LlmUsageRepository(session)
-            events = repo.get_events_by_user_id(user_id)
-            assert len(events) >= 1, f"No events recorded for case {case_name}"
-            target_event = events[0]
-            assert target_event.status == expected_status, f"Wrong status for {case_name}: {target_event.status}"
-            assert target_event.estimated_cost_micros > 0, f"Cost bound lost for {case_name}"
+    client = OpenRouterClient(
+        api_key="test-key",
+        timeout_seconds=1,
+        transport=make_transport(case_name),
+    )
+
+    with pg_session_factory() as session:
+        user_model, current_user = _create_user(session)
+        user_id = user_model.id
+
+    svc, _ = _build_test_service(pg_session_factory, client)
+
+    if case_name == "partial_usage":
+        # Guard passes with partial usage, generator also returns partial usage
+        def gen_transport(url: str, body: bytes, headers: dict[str, str], timeout: float) -> HttpResponse:
+            # Check if prompt contains guard or generator
+            if b"safety evaluator" in body or b"guard" in body:
+                return HttpResponse(
+                    200,
+                    json.dumps({
+                        "choices": [{"message": {"content": '{"safe": true}'}}],
+                        "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+                        "model": "openrouter/free",
+                    }),
+                    {},
+                )
+            return HttpResponse(
+                200,
+                json.dumps({
+                    "choices": [{"message": {"content": 'console.log("ok");'}}],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+                    "model": "openrouter/free",
+                }),
+                {},
+            )
+        client_gen = OpenRouterClient(
+            api_key="test-key",
+            timeout_seconds=1,
+            transport=gen_transport,
+        )
+        svc_gen, _ = _build_test_service(pg_session_factory, client_gen)
+        res = svc_gen.generate(GenerateRequest(prompt="test partial"), current_user)
+        assert res.content == 'console.log("ok");'
+    else:
+        with pytest.raises(Exception):
+            svc.generate(GenerateRequest(prompt="test outcome"), current_user)
+
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        reservations = repo.get_reservations_by_user_id(user_id)
+        assert len(reservations) == 2, f"Expected 2 reservations for {case_name}, got {len(reservations)}"
+        guard_res = next(r for r in reservations if r.call_kind == "guard")
+        gen_res = next(r for r in reservations if r.call_kind == "generator")
+
+        events = repo.get_events_by_user_id(user_id)
+        now_utc = guard_res.created_at.astimezone(UTC)
+        day_start = now_utc.date()
+        month_start = day_start.replace(day=1)
+
+        if case_name == "partial_usage":
+            # Case 5: Both guard and generator succeeded with 0 tokens reported.
+            # Both reservations must be settled, retaining their full reserved cost bounds.
+            assert guard_res.state == "settled"
+            assert gen_res.state == "settled"
+            assert len(events) == 2, f"Expected 2 events for partial_usage, got {len(events)}"
+
+            guard_event = next(e for e in events if e.reservation_id == guard_res.id)
+            gen_event = next(e for e in events if e.reservation_id == gen_res.id)
+
+            assert guard_event.status == "ok"
+            assert gen_event.status == "ok"
+            # Exact equality: full reserved bounds are preserved on both ledger events
+            assert guard_event.estimated_cost_micros == guard_res.cost_reserved_micros
+            assert gen_event.estimated_cost_micros == gen_res.cost_reserved_micros
+            assert guard_event.model_id == "openrouter/free"
+            assert gen_event.model_id == "openrouter/free"
+
+            expected_total_cost = guard_res.cost_reserved_micros + gen_res.cost_reserved_micros
+            for scope, key in [("user", str(user_id)), ("global", "-")]:
+                for wk, ws in [("day", day_start), ("month", month_start)]:
+                    c = repo.get_counter(scope=scope, scope_key=key, window_kind=wk, window_start=ws)
+                    assert c is not None, f"Counter missing for {scope}/{wk} in {case_name}"
+                    assert c.calls_reserved == 2
+                    assert c.calls_settled == 2
+                    assert c.cost_reserved_micros == 0
+                    assert c.cost_micros == expected_total_cost, (
+                        f"Counter cost_micros {c.cost_micros} != expected {expected_total_cost} for {scope}/{wk}"
+                    )
+        else:
+            # Cases 1-4: Guard call failed; guard settled with failure status; generator was released downstream.
+            assert guard_res.state == "settled"
+            assert gen_res.state == "released"
+            assert len(events) == 1, f"Expected exactly 1 event for {case_name}, got {len(events)}"
+
+            guard_event = events[0]
+            assert guard_event.reservation_id == guard_res.id
+            assert guard_event.status == expected_status, f"Wrong status for {case_name}: {guard_event.status}"
+            # Exact equality: full conservative reserved bound is kept on ledger
+            assert guard_event.estimated_cost_micros == guard_res.cost_reserved_micros
             if not expect_model_in_ledger:
-                assert target_event.model_id is None, f"Expected model_id None for {case_name}"
+                assert guard_event.model_id is None
+            else:
+                assert guard_event.model_id == "openrouter/free"
+
+            # Check all 4 counters: user/day, user/month, global/day, global/month
+            for scope, key in [("user", str(user_id)), ("global", "-")]:
+                for wk, ws in [("day", day_start), ("month", month_start)]:
+                    c = repo.get_counter(scope=scope, scope_key=key, window_kind=wk, window_start=ws)
+                    assert c is not None, f"Counter missing for {scope}/{wk} in {case_name}"
+                    assert c.calls_reserved == 1, f"calls_reserved mismatch for {scope}/{wk} in {case_name}"
+                    assert c.calls_settled == 1, f"calls_settled mismatch for {scope}/{wk} in {case_name}"
+                    assert c.cost_reserved_micros == 0, f"cost_reserved_micros must be 0 for {scope}/{wk} in {case_name}"
+                    assert c.cost_micros == guard_res.cost_reserved_micros, (
+                        f"cost_micros {c.cost_micros} != full bound {guard_res.cost_reserved_micros} for {scope}/{wk} in {case_name}"
+                    )
 
 
 def test_10_concurrent_release_idempotency(
@@ -1181,27 +1244,21 @@ def test_f1_window_binding_across_midnight_and_month_boundaries(
 
     with pg_session_factory() as session:
         repo = LlmUsageRepository(session)
-        # Verify September counters were decremented
-        c_sep_user_day = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="day", window_start=sep_day)
-        assert c_sep_user_day.calls_reserved == 1
-        assert c_sep_user_day.cost_reserved_micros == 10_000
+        # Verify September counters were decremented across user and global keys
+        for scope, key in [("user", str(user_id)), ("global", "-")]:
+            for wk, ws in [("day", sep_day), ("month", sep_month)]:
+                c_sep = repo.get_counter(scope=scope, scope_key=key, window_kind=wk, window_start=ws)
+                assert c_sep.calls_reserved == 1
+                assert c_sep.cost_reserved_micros == 10_000
 
-        c_sep_user_month = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="month", window_start=sep_month)
-        assert c_sep_user_month.calls_reserved == 1
-        assert c_sep_user_month.cost_reserved_micros == 10_000
-
-        # Verify October counters remain 100% UNCHANGED
-        c_oct_user_day = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="day", window_start=oct_day)
-        assert c_oct_user_day.calls_reserved == 3
-        assert c_oct_user_day.calls_settled == 1
-        assert c_oct_user_day.cost_reserved_micros == 20_000
-        assert c_oct_user_day.cost_micros == 5000
-
-        c_oct_user_month = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="month", window_start=oct_month)
-        assert c_oct_user_month.calls_reserved == 3
-        assert c_oct_user_month.calls_settled == 1
-        assert c_oct_user_month.cost_reserved_micros == 20_000
-        assert c_oct_user_month.cost_micros == 5000
+        # Verify October counters remain 100% UNCHANGED across user and global keys
+        for scope, key in [("user", str(user_id)), ("global", "-")]:
+            for wk, ws in [("day", oct_day), ("month", oct_month)]:
+                c_oct = repo.get_counter(scope=scope, scope_key=key, window_kind=wk, window_start=ws)
+                assert c_oct.calls_reserved == 3
+                assert c_oct.calls_settled == 1
+                assert c_oct.cost_reserved_micros == 20_000
+                assert c_oct.cost_micros == 5000
 
     # Case B: Settle September reservation
     response = LlmProviderResponse(text='{"safe": true}', model="openrouter/free", prompt_tokens=10, completion_tokens=5)
@@ -1218,30 +1275,32 @@ def test_f1_window_binding_across_midnight_and_month_boundaries(
 
     with pg_session_factory() as session:
         repo = LlmUsageRepository(session)
-        # Verify September counters settled
-        c_sep_user_day = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="day", window_start=sep_day)
-        assert c_sep_user_day.calls_reserved == 1
-        assert c_sep_user_day.calls_settled == 1
+        # Verify September counters settled across user and global keys
+        for scope, key in [("user", str(user_id)), ("global", "-")]:
+            for wk, ws in [("day", sep_day), ("month", sep_month)]:
+                c_sep = repo.get_counter(scope=scope, scope_key=key, window_kind=wk, window_start=ws)
+                assert c_sep.calls_reserved == 1
+                assert c_sep.calls_settled == 1
+                assert c_sep.cost_reserved_micros == 0
 
-        c_sep_user_month = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="month", window_start=sep_month)
-        assert c_sep_user_month.calls_reserved == 1
-        assert c_sep_user_month.calls_settled == 1
+        # Verify October counters are STILL 100% UNCHANGED across user and global keys
+        for scope, key in [("user", str(user_id)), ("global", "-")]:
+            for wk, ws in [("day", oct_day), ("month", oct_month)]:
+                c_oct = repo.get_counter(scope=scope, scope_key=key, window_kind=wk, window_start=ws)
+                assert c_oct.calls_reserved == 3
+                assert c_oct.calls_settled == 1
+                assert c_oct.cost_reserved_micros == 20_000
+                assert c_oct.cost_micros == 5000
 
-        # Verify October counters are STILL 100% UNCHANGED
-        c_oct_user_day = repo.get_counter(scope="user", scope_key=str(user_id), window_kind="day", window_start=oct_day)
-        assert c_oct_user_day.calls_reserved == 3
-        assert c_oct_user_day.calls_settled == 1
-        assert c_oct_user_day.cost_micros == 5000
-
-    # Case C: Absent October rows
+    # Case C: Absent October rows: both release and settle do not create October rows
     with pg_session_factory() as session:
         user2, _ = _create_user(session)
         user2_id = user2.id
         repo = LlmUsageRepository(session)
         for scope, key in [("user", str(user2_id)), ("global", "-")]:
-            repo.reserve_quota(scope=scope, scope_key=key, window_kind="day", window_start=sep_day, call_cost=1, cost_reserved_micros=10_000)
-            repo.reserve_quota(scope=scope, scope_key=key, window_kind="month", window_start=sep_month, call_cost=1, cost_reserved_micros=10_000)
-        res_absent = repo.create_reservation(
+            repo.reserve_quota(scope=scope, scope_key=key, window_kind="day", window_start=sep_day, call_cost=2, cost_reserved_micros=20_000)
+            repo.reserve_quota(scope=scope, scope_key=key, window_kind="month", window_start=sep_month, call_cost=2, cost_reserved_micros=20_000)
+        res_rel_absent = repo.create_reservation(
             user_id=user2_id,
             request_id=uuid4(),
             call_kind="generator",
@@ -1249,15 +1308,38 @@ def test_f1_window_binding_across_midnight_and_month_boundaries(
             cost_reserved_micros=10_000,
             created_at=sep_time,
         )
+        res_set_absent = repo.create_reservation(
+            user_id=user2_id,
+            request_id=uuid4(),
+            call_kind="guard",
+            provider="openrouter",
+            cost_reserved_micros=10_000,
+            created_at=sep_time,
+        )
+        repo.transition_reservation_to_started(res_set_absent.id)
         session.commit()
-        absent_id = res_absent.id
+        rel_absent_id = res_rel_absent.id
+        set_absent_id = res_set_absent.id
+        set_absent_req_id = res_set_absent.request_id
 
-    usage_svc.release_reservation(reservation_id=absent_id, user_id=user2_id)
+    usage_svc.release_reservation(reservation_id=rel_absent_id, user_id=user2_id)
+    usage_svc.settle_call(
+        reservation_id=set_absent_id,
+        user_id=user2_id,
+        request_id=set_absent_req_id,
+        call_kind="guard",
+        provider_name="openrouter",
+        model_id="openrouter/free",
+        response=response,
+        status="ok",
+    )
+
     with pg_session_factory() as session:
         repo = LlmUsageRepository(session)
-        # October row was never created
-        c_oct_absent = repo.get_counter(scope="user", scope_key=str(user2_id), window_kind="day", window_start=oct_day)
-        assert c_oct_absent is None
+        # October user rows were never created by release or settle
+        for wk, ws in [("day", oct_day), ("month", oct_month)]:
+            c_oct_absent = repo.get_counter(scope="user", scope_key=str(user2_id), window_kind=wk, window_start=ws)
+            assert c_oct_absent is None
 
 
 def test_f2_wire_prompt_sizing_and_guard_max_tokens_cap(
@@ -1270,12 +1352,13 @@ def test_f2_wire_prompt_sizing_and_guard_max_tokens_cap(
         prompt="x" * 100,
         context=large_context,
         base_code="b" * 8000,
-        cell_title="My Notebook Title",
+        notebook_title="My Notebook Title",
         mode="edit",
     )
     gen_user_prompt = _build_generation_prompt(req)
     prompt_bytes = len(gen_user_prompt.encode("utf-8"))
     assert prompt_bytes > 16_000
+    assert "My Notebook Title" in gen_user_prompt
 
     # 2. Cost ceiling enforcement: a ceiling of 50,000 micros allows a small 100-byte prompt
     # (~35,000 micros) but REFUSES this full 16,000-byte edit prompt (>70,000 micros bound).

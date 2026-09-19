@@ -186,17 +186,18 @@ CREATE TABLE IF NOT EXISTS users.llm_entitlement (
 
 
 def load_migration_0007_sql() -> str:
-    """Load SQL from Liquibase changeset 0007-llm-usage-controls.xml if available."""
+    """Load SQL from Liquibase changeset 0007-llm-usage-controls.xml."""
     xml_path = Path(__file__).parent.parent / "liquibase" / "changelog" / "changes" / "users" / "0007-llm-usage-controls.xml"
-    if xml_path.exists():
-        try:
-            tree = ET.parse(xml_path)
-            for elem in tree.iter():
-                if elem.tag.endswith("sql") and "CREATE TABLE" in (elem.text or ""):
-                    return elem.text.strip()
-        except Exception:
-            pass
-    return MIGRATION_0007_SQL.strip()
+    if not xml_path.exists():
+        raise RuntimeError(f"Liquibase migration XML not found at {xml_path}")
+    try:
+        tree = ET.parse(xml_path)
+        for elem in tree.iter():
+            if elem.tag.endswith("sql") and "CREATE TABLE" in (elem.text or ""):
+                return elem.text.strip()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to parse Liquibase migration XML at {xml_path}: {exc}") from exc
+    raise RuntimeError(f"No CREATE TABLE SQL found in Liquibase migration XML at {xml_path}")
 
 
 def _resolve_postgres_cluster_url() -> str | None:
@@ -322,9 +323,9 @@ def pg_session_factory(postgres_cluster_url: str | None) -> Generator[sessionmak
     finally:
         if engine is not None:
             engine.dispose()
+        admin_conn = psycopg2.connect(postgres_cluster_url)
+        admin_conn.autocommit = True
         try:
-            admin_conn = psycopg2.connect(postgres_cluster_url)
-            admin_conn.autocommit = True
             cur = admin_conn.cursor()
             cur.execute(f"""
                 SELECT pg_terminate_backend(pid)
@@ -333,6 +334,5 @@ def pg_session_factory(postgres_cluster_url: str | None) -> Generator[sessionmak
             """)
             cur.execute(f'DROP DATABASE IF EXISTS "{disposable_db}";')
             cur.close()
+        finally:
             admin_conn.close()
-        except Exception:
-            pass
