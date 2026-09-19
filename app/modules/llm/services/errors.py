@@ -68,3 +68,28 @@ class LlmTimeoutError(LlmServiceError):
 
     code = "llm_timeout"
     status_code = 504
+
+
+class LlmQuotaExceededError(LlmServiceError):
+    """Raised when per-user or global LLM quota is exhausted (Step 8e-2)."""
+
+    code = "llm_quota_exceeded"
+    status_code = 429
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after: int,
+        scope: str,
+        window_kind: str,
+    ) -> None:
+        super().__init__(
+            message,
+            code=self.code,
+            status_code=self.status_code,
+            headers={"Retry-After": str(max(1, retry_after))},
+        )
+        self.retry_after = max(1, retry_after)
+        self.scope = scope
+        self.window_kind = window_kind

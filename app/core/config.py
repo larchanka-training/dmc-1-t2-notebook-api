@@ -124,6 +124,8 @@ class Settings(BaseSettings):
     llm_worst_case_price_micros_completion: int = 15_000  # $15 / 1M = 15,000 micros / 1K tokens
     llm_system_prompt_allowance_tokens: int = 1_000
     llm_guard_output_tokens_max: int = 100
+    # Maximum size in bytes for compiler/syntax validation error text passed to repair prompts.
+    llm_validation_error_max_bytes: int = 2_048
     # Backend code-execution endpoint (POST /api/v1/execute). Disabled by
     # default: it is a debug/fallback runner, not the production sandbox.
     # See docs/execution-architecture.md §12. The subprocess runner is NOT a
@@ -267,6 +269,8 @@ class Settings(BaseSettings):
             raise ValueError("LLM_SYSTEM_PROMPT_ALLOWANCE_TOKENS must be positive")
         if self.llm_guard_output_tokens_max <= 0:
             raise ValueError("LLM_GUARD_OUTPUT_TOKENS_MAX must be positive")
+        if self.llm_validation_error_max_bytes <= 0:
+            raise ValueError("LLM_VALIDATION_ERROR_MAX_BYTES must be positive")
         if self.execute_default_timeout_ms <= 0:
             raise ValueError("EXECUTE_DEFAULT_TIMEOUT_MS must be positive")
         if self.execute_max_timeout_ms <= 0:

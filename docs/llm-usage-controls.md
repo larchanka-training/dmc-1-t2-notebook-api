@@ -529,12 +529,11 @@ Two different numbers, and the distinction matters:
   model's billing. Measuring the bytes actually about to be sent removes the guess.
 
   This is only computable once the validator's error text is capped.
-  `LLM_VALIDATION_ERROR_MAX_BYTES` does not exist yet: `syntax_validator` returns
-  esbuild's raw `stderr`/`stdout` verbatim, bounded by nothing. **8e-2 must add the
-  cap and truncate that text** — without it the repair prompt has no maximum size, so
-  the ceiling is unenforceable on exactly the path most likely to loop. It is a
-  product fix in its own right: an unbounded compiler error is already being sent to a
-  paid model.
+  `LLM_VALIDATION_ERROR_MAX_BYTES` is implemented in Step 8e-2: `syntax_validator` error
+  text is truncated before insertion into the repair prompt (with a `" [truncated]"` marker),
+  strictly guaranteeing that the total payload never exceeds the configured byte cap.
+  Without it the repair prompt has no maximum size, so the ceiling is unenforceable on
+  exactly the path most likely to loop.
 
   Prices come from the configured map for a pinned model, or from configured
   `LLM_WORST_CASE_PRICE_MICROS_PROMPT` and `LLM_WORST_CASE_PRICE_MICROS_COMPLETION`
@@ -572,15 +571,15 @@ Windows are UTC calendar day/month. A rolling window would need per-event scans;
 calendar window is a single row and is what a user-facing "resets at midnight UTC"
 message can honestly describe.
 
-### Configuration settings surface (Step 8e-1)
+### Configuration settings surface (Step 8e-1 & Step 8e-2)
 
-The following deployment settings in `app/core/config.py` configure quota limits, global cost ceilings, and conservative upper-bound pricing parameters.
+The following deployment settings in `app/core/config.py` configure quota limits, global cost ceilings, conservative upper-bound pricing parameters, and validation error limits.
 
 > [!IMPORTANT]
 > **Provisional Operational Defaults**: All proposed tier limits, global ceilings, and price model parameters are provisional operational defaults for development, testing, and capacity modeling. They are **not** evidence of approved or reserved provider capacity.
 
 > [!NOTE]
-> **Deferred Enforcement Wiring**: In Step 8e-1, these settings are exposed in `Settings` and validated at application startup. Active runtime enforcement wiring into the generation pipeline (`POST /api/v1/llm/generate`) and reservation orchestration are explicitly deferred to Step 8e-2.
+> **Enforcement Wiring (Step 8e-2)**: Active runtime enforcement wiring into the generation pipeline (`POST /api/v1/llm/generate`) and reservation orchestration is implemented in Step 8e-2, along with `LLM_VALIDATION_ERROR_MAX_BYTES`.
 
 | Environment variable | Type | Default | Units | Validation rules | Description |
 |---|---|---|---|---|---|
@@ -594,6 +593,7 @@ The following deployment settings in `app/core/config.py` configure quota limits
 | `LLM_WORST_CASE_PRICE_MICROS_COMPLETION` | int | `15000` | micros per 1,000 tokens ($15 / 1M tokens) | Positive integer | Conservative upper-bound completion token price for reservation sizing |
 | `LLM_SYSTEM_PROMPT_ALLOWANCE_TOKENS` | int | `1000` | tokens | Positive integer | Token buffer added to input prompt estimation for repair passes |
 | `LLM_GUARD_OUTPUT_TOKENS_MAX` | int | `100` | tokens | Positive integer | Maximum output tokens expected from safety guard evaluation pass |
+| `LLM_VALIDATION_ERROR_MAX_BYTES` | int | `2048` | bytes | Positive integer | Maximum bytes of syntax validator error text passed to LLM repair prompt (excess truncated with marker) |
 
 ## 8. Error contract
 
@@ -605,12 +605,38 @@ A new code, distinct from the existing limiter:
 | quota exhausted (new) | 429 | `llm_quota_exceeded` | seconds to the next UTC window boundary |
 
 They must not share a code. "Wait a minute" and "you are done until tomorrow" are
-different instructions, and the UI already keys off `error.code`. The response says
-which window was exhausted (`day` / `month`) and whether it was the user's or the
-deployment's — the latter without disclosing global numbers.
+different instructions, and the UI keys off `error.code`.
 
-When implemented this is an OpenAPI change and, per `AGENTS.md` §7, a matching
-`ui/openapi/llm.openapi.yaml` update.
+When quota is exhausted, the endpoint responds with HTTP 429, the standard error
+envelope matching `ApiErrorEnvelope`, and the `Retry-After` header indicating seconds
+to the next window boundary:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 7200
+Content-Type: application/json
+```
+
+```json
+{
+  "error": {
+    "code": "llm_quota_exceeded",
+    "message": "Daily generation quota exhausted. Resets at midnight UTC.",
+    "fields": {}
+  }
+}
+```
+
+The error message indicates whether the daily or monthly limit was reached.
+Machine-readable retry timing is communicated via the standard `Retry-After` HTTP
+header rather than custom JSON body fields.
+
+In Step 8e-2, this error code is implemented in the backend API router with HTTP 429
+status code and `Retry-After` header. The OpenAPI spec describes the 429 response.
+Companion UI error handling (distinguishing `rate_limited` from `llm_quota_exceeded`
+in user-facing toasts or dialogs, and consuming `ui/openapi/llm.openapi.yaml`) will be
+synchronized in the UI submodule as part of the frontend roadmap prior to monorepo
+promotion.
 
 ## 9. Usage view
 

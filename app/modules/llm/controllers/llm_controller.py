@@ -45,7 +45,7 @@ _PIPELINE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm-p
         },
         429: {
             "model": ApiErrorResponse,
-            "description": "Per-user LLM rate limit exceeded",
+            "description": "Per-user LLM rate limit or usage quota exceeded",
         },
         500: {
             "model": ApiErrorResponse,
