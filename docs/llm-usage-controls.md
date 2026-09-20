@@ -752,40 +752,48 @@ The reconciliation tool is packaged in the API codebase and shipped inside the p
 
 #### Access Control & Security (Fail-Closed)
 Admin routes (`/api/v1/llm/admin/*`) require explicit administrative privileges:
-1. Users with `"admin"` in their JWT token roles.
-2. Users whose verified account email is listed in `LLM_ADMIN_EMAILS` (or `LLM_ALLOWED_EMAILS` fallback).
-3. **Fail-closed policy:** If both allowlists are empty, admin endpoints return `HTTP 403 Forbidden` (`llm_admin_access_denied`). Admin access is never open to arbitrary authenticated users, regardless of whether generation access is open to the public.
+1. Users with `"admin"` in their JWT token roles. (Note: in the current auth flow, `get_current_user` constructs user identity with `roles=[]`, so active authorization relies on email allowlists until role claims are populated).
+2. Users whose verified account email is listed in `LLM_ADMIN_EMAILS`.
+3. **Fallback & Fail-closed policy:** If `LLM_ADMIN_EMAILS` is set, only listed emails (or admin role) have access. If `LLM_ADMIN_EMAILS` is empty, it falls back to explicit emails in `LLM_ALLOWED_EMAILS`. If both allowlists are empty, admin endpoints return `HTTP 403 Forbidden` (`llm_admin_access_denied`). Admin access is never open to arbitrary authenticated users, regardless of whether generation access is open to the public.
 
 #### Counter Semantics in Views
 In `LlmQuotaWindowView`:
 - `calls_reserved`: Total calls admitted into the quota window and currently charged against `call_limit`. This value is never decremented when a call settles.
-- `calls_settled`: Count of successfully completed and settled calls within this window.
-- `calls_total`: Equivalent to `calls_reserved` (total calls authorized against quota). Outstanding in-flight or unresolved calls equal `calls_reserved - calls_settled`.
-- `cost_reserved_micros`: Active reserved cost bound for in-flight requests.
-- `cost_micros`: Settled actual cost incurred by completed requests.
+- `calls_settled`: Count of completed calls (both successful completions and handled errors/timeouts) within this window that reached a final outcome.
+- `calls_total`: Equivalent to `calls_reserved` (total calls admitted against quota). Outstanding in-flight or unresolved calls equal `calls_reserved - calls_settled`.
+- `cost_reserved_micros`: Active reserved cost bound for in-flight and unresolved (`unknown`) requests.
+- `cost_micros`: Settled estimated cost incurred by completed requests (app-side token cost estimate or conservative bound).
 - `cost_total_micros`: Combined liability (`cost_reserved_micros + cost_micros`) enforced against `cost_limit_micros`.
 
-#### Safe Threshold Selection
-- Pipeline execution timeout is 30 seconds (`LLM_REQUEST_TIMEOUT_SECONDS=30`) with up to 2 validation repair retries, giving a worst-case pipeline latency of approximately 90 seconds.
-- `LLM_RECONCILIATION_STALE_SECONDS` defaults to **300 seconds** (5 minutes). This provides a >3x safety buffer over the worst-case pipeline duration, preventing active in-flight calls from being prematurely marked `unknown` or released.
-- Non-positive thresholds (`<= 0`) and batch limits (`<= 0`) are rejected with errors by both the CLI parser and service before any database transaction opens.
+#### Preliminary Stale Threshold & Operational Guidance
+- Provider requests configure transport-level timeouts (`LLM_REQUEST_TIMEOUT_SECONDS=30`), and HTTP waiting in `llm_controller.py` bounds response waiting via `future.result(timeout=...)`. However, timing out on `future.result` does **not** cancel or abort the background worker thread.
+- A full generation pipeline may encompass a guard check, initial code generation, validation, and up to two repair retries, each involving network requests, processing, and potential provider backoffs. There is currently no hard process-wide wall-clock deadline terminating the worker.
+- Consequently, `LLM_RECONCILIATION_STALE_SECONDS` defaults to **300 seconds** (5 minutes) as a **preliminary heuristic default**, not a proven upper bound or mathematical guarantee.
+- Reconciling active reservations too early carries operational trade-offs:
+  - If a running request in `started` is reconciled prematurely, it transitions to `unknown`. Any subsequent late settlement becomes a no-op, preserving the conservative reserved cost bound rather than updating to actual token consumption.
+  - If a queued generator reservation in `reserved` is released prematurely, its later start attempt will be blocked.
+- Non-positive thresholds (`<= 0`) and batch limits (`<= 0`) are strictly rejected by both CLI argument validation and the reconciliation service before acquiring database transactions.
+- **Operational Activation Gate:** Tooling and container packaging (`COPY scripts ./scripts`) are delivered in Step 8e-3. Activating regular automated background execution (e.g. system cron or Kubernetes CronJob) is an **operational deployment gate**. Before scheduling periodic reconciliation in production, operators must:
+  1. Measure actual observed p99 pipeline durations from telemetry once OpenRouter traffic is active.
+  2. Verify effective provider timeouts, retry configurations, and thread pool worker behaviors.
+  3. Select an operational threshold with an agreed safety margin based on real telemetry rather than theoretical defaults.
+  4. Ensure log monitoring is configured for `llm.reconcile.cli.*` events.
 
 #### Operational Execution & Dry-Run
 Before applying automated mutations, operators can safely inspect candidate backlog size:
 ```bash
-# Non-destructive inspection
+# Non-destructive inspection (dry-run options accepted before or after subcommand)
 python scripts/reconcile_llm_usage.py run --dry-run
+python scripts/reconcile_llm_usage.py --dry-run run
+python scripts/reconcile_llm_usage.py --dry-run
 
 # Targeted execution with overrides
 python scripts/reconcile_llm_usage.py run --stale-seconds 600 --limit 50
 ```
-Output is returned as structured JSON:
+Output is returned as structured JSON matching API schema field names:
 ```json
-{"dry_run": true, "reconciled_reserved": 0, "reconciled_started": 0, "returned_cost_micros": 0}
+{"cutoff": "2026-09-21T00:00:00Z", "dry_run": true, "reconciledReserved": 0, "reconciledStarted": 0, "returnedCostMicros": 0}
 ```
-
-#### Operational Activation Gate
-Tooling and container packaging are delivered and verified in Step 8e-3. Regular automated invocation (e.g. system cron, Kubernetes CronJob, or external orchestrator running every 5–10 minutes) represents an **operational deployment gate** to be scheduled in the production infrastructure environment alongside log monitoring for `llm.reconcile.cli.*` events.
 
 Cloud LLM stays allowlist-only until 8e-2 is deployed.
 

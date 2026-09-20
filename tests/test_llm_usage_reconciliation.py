@@ -21,7 +21,10 @@ from app.modules.auth.schemas import CurrentUser
 from app.modules.llm.repositories import LlmUsageRepository
 from app.modules.llm.services.provider import LlmProviderResponse
 from app.modules.llm.services.reconciliation_service import LlmReconciliationService
-from app.modules.llm.services.usage_service import LlmUsageService
+from app.modules.llm.services.usage_service import (
+    LlmUsageService,
+    calculate_cost_micros,
+)
 
 
 def _create_user(db: Session) -> tuple[UserModel, CurrentUser]:
@@ -583,7 +586,15 @@ def test_deterministic_interleaving_settle_first(
     assert summary.reconciled_started == 0
     assert summary.returned_cost_micros == 0
 
-    # Verification: reservation is 'settled', exactly 1 ledger event, counter has cost_micros
+    # Verification: reservation is 'settled', exactly 1 ledger event, counters reflect exact cost
+    expected_cost = calculate_cost_micros(
+        prompt_tokens=50,
+        completion_tokens=25,
+        prompt_price_per_1k=settings.llm_worst_case_price_micros_prompt,
+        completion_price_per_1k=settings.llm_worst_case_price_micros_completion,
+    )
+    assert expected_cost > 0
+
     with pg_session_factory() as session:
         repo = LlmUsageRepository(session)
         assert repo.get_reservation_by_id(res_id).state == "settled"
@@ -591,26 +602,27 @@ def test_deterministic_interleaving_settle_first(
         assert len(events) == 1
         assert events[0].status == "ok"
 
-        ctr = repo.get_counter(
-            scope="user",
-            scope_key=str(user_id),
-            window_kind="day",
-            window_start=day_start,
-        )
-        assert ctr is not None
-        assert ctr.calls_reserved == 1
-        assert ctr.calls_settled == 1
-        assert ctr.cost_reserved_micros == 0
-        assert ctr.cost_micros > 0
+        for scope, scope_key, window_kind, window_start in scopes:
+            ctr = repo.get_counter(
+                scope=scope,
+                scope_key=scope_key,
+                window_kind=window_kind,
+                window_start=window_start,
+            )
+            assert ctr is not None
+            assert ctr.calls_reserved == 1
+            assert ctr.calls_settled == 1
+            assert ctr.cost_reserved_micros == 0
+            assert ctr.cost_micros == expected_cost
 
 
 def test_deterministic_interleaving_reconcile_first(
     pg_session_factory: sessionmaker[Session],
 ) -> None:
-    """S1: Deterministic interleaving where reconciliation claims state first.
+    """S1: Sequential ordered execution where reconciliation claims state first.
 
     Reservation transitions to 'unknown', appending ledger event. Subsequent late settlement
-    cannot overwrite 'unknown'.
+    cannot overwrite 'unknown'. Counters across all four scopes preserve reserved cost.
     """
     settings = _make_test_settings(llm_reconciliation_stale_seconds=300)
     usage_svc = LlmUsageService(session_factory=pg_session_factory, settings=settings)
@@ -690,18 +702,19 @@ def test_deterministic_interleaving_reconcile_first(
         assert len(events) == 1
         assert events[0].status == "unknown"
 
-        # Counters preserved: cost_reserved_micros preserved, cost_micros remains 0
-        ctr = repo.get_counter(
-            scope="user",
-            scope_key=str(user_id),
-            window_kind="day",
-            window_start=day_start,
-        )
-        assert ctr is not None
-        assert ctr.calls_reserved == 1
-        assert ctr.calls_settled == 0
-        assert ctr.cost_reserved_micros == cost_reserved
-        assert ctr.cost_micros == 0
+        # Counters preserved across all four scopes
+        for scope, scope_key, window_kind, window_start in scopes:
+            ctr = repo.get_counter(
+                scope=scope,
+                scope_key=scope_key,
+                window_kind=window_kind,
+                window_start=window_start,
+            )
+            assert ctr is not None
+            assert ctr.calls_reserved == 1
+            assert ctr.calls_settled == 0
+            assert ctr.cost_reserved_micros == cost_reserved
+            assert ctr.cost_micros == 0
 
 
 def test_reconciliation_repeat_idempotency(

@@ -27,26 +27,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Reconcile stale or orphaned LLM usage reservations."
     )
+    parser.add_argument(
+        "--stale-seconds",
+        type=int,
+        default=None,
+        help="age threshold in seconds before a reservation is considered stale",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="maximum number of stale reservations to process in this run",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="report counts without mutating reservations or quota counters",
+    )
+
     subparsers = parser.add_subparsers(dest="command")
     run_parser = subparsers.add_parser("run", help="run reconciliation")
-    for p in (parser, run_parser):
-        p.add_argument(
-            "--stale-seconds",
-            type=int,
-            default=None,
-            help="age threshold in seconds before a reservation is considered stale",
-        )
-        p.add_argument(
-            "--limit",
-            type=int,
-            default=None,
-            help="maximum number of stale reservations to process in this run",
-        )
-        p.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="report counts without mutating reservations or quota counters",
-        )
+    run_parser.add_argument(
+        "--stale-seconds",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="age threshold in seconds before a reservation is considered stale",
+    )
+    run_parser.add_argument(
+        "--limit",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="maximum number of stale reservations to process in this run",
+    )
+    run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="report counts without mutating reservations or quota counters",
+    )
     return parser
 
 
