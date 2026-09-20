@@ -56,6 +56,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.stale_seconds is not None and args.stale_seconds <= 0:
+        parser.error("--stale-seconds must be a positive integer (> 0)")
+
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be a positive integer (> 0)")
+
     session_factory = get_session_factory()
     service = LlmReconciliationService(
         session_factory=session_factory,

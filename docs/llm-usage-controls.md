@@ -741,6 +741,52 @@ promotion.
      reconciliation inspects it resolves deterministically without double-counting
      or double-releasing.
 
+### 10.1 Operational Runbook: Stale Reservation Reconciliation (Step 8e-3)
+
+#### Delivery & Packaging
+The reconciliation tool is packaged in the API codebase and shipped inside the production container image:
+- **CLI Entrypoint:** `python scripts/reconcile_llm_usage.py [run] [--stale-seconds N] [--limit M] [--dry-run]`
+- **Admin HTTP Endpoint:** `POST /api/v1/llm/admin/reconcile` (guarded by `enforce_llm_admin_access`)
+- **Admin Usage View:** `GET /api/v1/llm/admin/usage` (guarded by `enforce_llm_admin_access`)
+- **User Usage View:** `GET /api/v1/llm/usage` (returns authenticated user quotas and `resets_at`)
+
+#### Access Control & Security (Fail-Closed)
+Admin routes (`/api/v1/llm/admin/*`) require explicit administrative privileges:
+1. Users with `"admin"` in their JWT token roles.
+2. Users whose verified account email is listed in `LLM_ADMIN_EMAILS` (or `LLM_ALLOWED_EMAILS` fallback).
+3. **Fail-closed policy:** If both allowlists are empty, admin endpoints return `HTTP 403 Forbidden` (`llm_admin_access_denied`). Admin access is never open to arbitrary authenticated users, regardless of whether generation access is open to the public.
+
+#### Counter Semantics in Views
+In `LlmQuotaWindowView`:
+- `calls_reserved`: Total calls admitted into the quota window and currently charged against `call_limit`. This value is never decremented when a call settles.
+- `calls_settled`: Count of successfully completed and settled calls within this window.
+- `calls_total`: Equivalent to `calls_reserved` (total calls authorized against quota). Outstanding in-flight or unresolved calls equal `calls_reserved - calls_settled`.
+- `cost_reserved_micros`: Active reserved cost bound for in-flight requests.
+- `cost_micros`: Settled actual cost incurred by completed requests.
+- `cost_total_micros`: Combined liability (`cost_reserved_micros + cost_micros`) enforced against `cost_limit_micros`.
+
+#### Safe Threshold Selection
+- Pipeline execution timeout is 30 seconds (`LLM_REQUEST_TIMEOUT_SECONDS=30`) with up to 2 validation repair retries, giving a worst-case pipeline latency of approximately 90 seconds.
+- `LLM_RECONCILIATION_STALE_SECONDS` defaults to **300 seconds** (5 minutes). This provides a >3x safety buffer over the worst-case pipeline duration, preventing active in-flight calls from being prematurely marked `unknown` or released.
+- Non-positive thresholds (`<= 0`) and batch limits (`<= 0`) are rejected with errors by both the CLI parser and service before any database transaction opens.
+
+#### Operational Execution & Dry-Run
+Before applying automated mutations, operators can safely inspect candidate backlog size:
+```bash
+# Non-destructive inspection
+python scripts/reconcile_llm_usage.py run --dry-run
+
+# Targeted execution with overrides
+python scripts/reconcile_llm_usage.py run --stale-seconds 600 --limit 50
+```
+Output is returned as structured JSON:
+```json
+{"dry_run": true, "reconciled_reserved": 0, "reconciled_started": 0, "returned_cost_micros": 0}
+```
+
+#### Operational Activation Gate
+Tooling and container packaging are delivered and verified in Step 8e-3. Regular automated invocation (e.g. system cron, Kubernetes CronJob, or external orchestrator running every 5–10 minutes) represents an **operational deployment gate** to be scheduled in the production infrastructure environment alongside log monitoring for `llm.reconcile.cli.*` events.
+
 Cloud LLM stays allowlist-only until 8e-2 is deployed.
 
 ## 11. Open questions

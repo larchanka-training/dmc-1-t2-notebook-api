@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     """
 
     app_name: str = "JS Notebook API"
-    app_version: str = "0.3.0"
+    app_version: str = "0.3.1"
     app_env: str = "dev"
     api_prefix: str = "/api/v1"
     app_host: str = "0.0.0.0"
@@ -86,8 +86,11 @@ class Settings(BaseSettings):
     # Comma-separated developer allowlist for the cloud LLM endpoint. EMPTY means
     # "no restriction" so existing deployments are unaffected. Non-empty restricts
     # POST /llm/generate to those verified account emails — used while the provider
-    # runs on a shared free tier whose daily quota any single user could exhaust.
     llm_allowed_emails: str = ""
+    # Comma-separated admin allowlist for LLM operational routes (GET /llm/admin/usage,
+    # POST /llm/admin/reconcile). If EMPTY, falls back to llm_allowed_emails, and if
+    # that is also EMPTY, admin access is strictly DENIED (fail-closed).
+    llm_admin_emails: str = ""
     llm_bedrock_region: str = "eu-north-1"
     llm_bedrock_guard_model_id: str = "eu.amazon.nova-micro-v1:0"
     llm_bedrock_generator_model_id: str = "eu.amazon.nova-lite-v1:0"
@@ -199,6 +202,15 @@ class Settings(BaseSettings):
         return frozenset(
             entry.strip().lower()
             for entry in self.llm_allowed_emails.split(",")
+            if entry.strip()
+        )
+
+    @property
+    def llm_admin_email_set(self) -> frozenset[str]:
+        """Parsed admin allowlist; compared case-insensitively. Empty set denies access."""
+        return frozenset(
+            entry.strip().lower()
+            for entry in self.llm_admin_emails.split(",")
             if entry.strip()
         )
 

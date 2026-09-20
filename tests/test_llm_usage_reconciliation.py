@@ -481,3 +481,258 @@ def test_reconciliation_dry_run_and_recent_reservation_untouched(
         repo = LlmUsageRepository(session)
         assert repo.get_reservation_by_id(stale_id).state == "released"
         assert repo.get_reservation_by_id(recent_id).state == "reserved"
+
+
+def test_reconcile_service_rejects_non_positive_threshold_and_limit(
+    pg_session_factory: sessionmaker[Session],
+) -> None:
+    """F3 Regression: Service strictly rejects non-positive stale_seconds and limit."""
+    settings = _make_test_settings()
+    reconciler = LlmReconciliationService(
+        session_factory=pg_session_factory, settings=settings
+    )
+
+    for invalid_val in [0, -1, -300]:
+        try:
+            reconciler.reconcile_stale_reservations(stale_seconds=invalid_val)
+            assert False, f"Expected ValueError for stale_seconds={invalid_val}"
+        except ValueError as err:
+            assert "stale_seconds must be a positive integer" in str(err)
+
+    for invalid_limit in [0, -1, -100]:
+        try:
+            reconciler.reconcile_stale_reservations(limit=invalid_limit)
+            assert False, f"Expected ValueError for limit={invalid_limit}"
+        except ValueError as err:
+            assert "limit must be a positive integer" in str(err)
+
+
+def test_deterministic_interleaving_settle_first(
+    pg_session_factory: sessionmaker[Session],
+) -> None:
+    """S1: Deterministic interleaving where settlement claims state first.
+
+    Reconciliation sees state is already 'settled' and performs zero mutations.
+    """
+    settings = _make_test_settings(llm_reconciliation_stale_seconds=300)
+    usage_svc = LlmUsageService(session_factory=pg_session_factory, settings=settings)
+    reconciler = LlmReconciliationService(
+        session_factory=pg_session_factory, settings=settings
+    )
+
+    now = datetime.now(UTC)
+    stale_created_at = now - timedelta(minutes=10)
+    day_start, month_start = usage_svc.get_window_dates(stale_created_at)
+
+    with pg_session_factory() as session:
+        user_model, _ = _create_user(session)
+        user_id = user_model.id
+        repo = LlmUsageRepository(session)
+
+        cost_reserved = 40000
+        req_id = uuid4()
+        res = repo.create_reservation(
+            user_id=user_id,
+            request_id=req_id,
+            call_kind="generator",
+            provider="openrouter",
+            cost_reserved_micros=cost_reserved,
+            created_at=stale_created_at,
+        )
+        repo.transition_reservation_to_started(res.id, started_at=stale_created_at)
+        res_id = res.id
+
+        scopes = [
+            ("global", "-", "day", day_start),
+            ("global", "-", "month", month_start),
+            ("user", str(user_id), "day", day_start),
+            ("user", str(user_id), "month", month_start),
+        ]
+        for scope, scope_key, window_kind, window_start in scopes:
+            repo.reserve_quota(
+                scope=scope,
+                scope_key=scope_key,
+                window_kind=window_kind,
+                window_start=window_start,
+                call_cost=1,
+                cost_reserved_micros=cost_reserved,
+            )
+        session.commit()
+
+    # Step 1: Late settlement claims state first
+    provider_response = LlmProviderResponse(
+        text="settled text",
+        model="openrouter/generator",
+        prompt_tokens=50,
+        completion_tokens=25,
+    )
+    usage_svc.settle_call(
+        reservation_id=res_id,
+        user_id=user_id,
+        request_id=req_id,
+        call_kind="generator",
+        provider_name="openrouter",
+        model_id="openrouter/generator",
+        response=provider_response,
+        status="ok",
+    )
+
+    # Step 2: Reconciler runs subsequently
+    summary = reconciler.reconcile_stale_reservations(now=now)
+    assert summary.reconciled_reserved == 0
+    assert summary.reconciled_started == 0
+    assert summary.returned_cost_micros == 0
+
+    # Verification: reservation is 'settled', exactly 1 ledger event, counter has cost_micros
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        assert repo.get_reservation_by_id(res_id).state == "settled"
+        events = repo.get_events_by_request_id(req_id)
+        assert len(events) == 1
+        assert events[0].status == "ok"
+
+        ctr = repo.get_counter(
+            scope="user",
+            scope_key=str(user_id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        assert ctr is not None
+        assert ctr.calls_reserved == 1
+        assert ctr.calls_settled == 1
+        assert ctr.cost_reserved_micros == 0
+        assert ctr.cost_micros > 0
+
+
+def test_deterministic_interleaving_reconcile_first(
+    pg_session_factory: sessionmaker[Session],
+) -> None:
+    """S1: Deterministic interleaving where reconciliation claims state first.
+
+    Reservation transitions to 'unknown', appending ledger event. Subsequent late settlement
+    cannot overwrite 'unknown'.
+    """
+    settings = _make_test_settings(llm_reconciliation_stale_seconds=300)
+    usage_svc = LlmUsageService(session_factory=pg_session_factory, settings=settings)
+    reconciler = LlmReconciliationService(
+        session_factory=pg_session_factory, settings=settings
+    )
+
+    now = datetime.now(UTC)
+    stale_created_at = now - timedelta(minutes=10)
+    day_start, month_start = usage_svc.get_window_dates(stale_created_at)
+
+    with pg_session_factory() as session:
+        user_model, _ = _create_user(session)
+        user_id = user_model.id
+        repo = LlmUsageRepository(session)
+
+        cost_reserved = 40000
+        req_id = uuid4()
+        res = repo.create_reservation(
+            user_id=user_id,
+            request_id=req_id,
+            call_kind="generator",
+            provider="openrouter",
+            cost_reserved_micros=cost_reserved,
+            created_at=stale_created_at,
+        )
+        repo.transition_reservation_to_started(res.id, started_at=stale_created_at)
+        res_id = res.id
+
+        scopes = [
+            ("global", "-", "day", day_start),
+            ("global", "-", "month", month_start),
+            ("user", str(user_id), "day", day_start),
+            ("user", str(user_id), "month", month_start),
+        ]
+        for scope, scope_key, window_kind, window_start in scopes:
+            repo.reserve_quota(
+                scope=scope,
+                scope_key=scope_key,
+                window_kind=window_kind,
+                window_start=window_start,
+                call_cost=1,
+                cost_reserved_micros=cost_reserved,
+            )
+        session.commit()
+
+    # Step 1: Reconciler runs first and claims 'started -> unknown'
+    summary = reconciler.reconcile_stale_reservations(now=now)
+    assert summary.reconciled_started == 1
+    assert summary.returned_cost_micros == 0
+
+    # Step 2: Late settlement attempts to run
+    provider_response = LlmProviderResponse(
+        text="late text",
+        model="openrouter/generator",
+        prompt_tokens=50,
+        completion_tokens=25,
+    )
+    # settle_call handles atomic state transition; because state is already 'unknown',
+    # it cannot claim 'started -> settled'
+    usage_svc.settle_call(
+        reservation_id=res_id,
+        user_id=user_id,
+        request_id=req_id,
+        call_kind="generator",
+        provider_name="openrouter",
+        model_id="openrouter/generator",
+        response=provider_response,
+        status="ok",
+    )
+
+    # Verification: reservation remains 'unknown', exactly 1 ledger event ('call_reconciled_unknown')
+    with pg_session_factory() as session:
+        repo = LlmUsageRepository(session)
+        assert repo.get_reservation_by_id(res_id).state == "unknown"
+        events = repo.get_events_by_request_id(req_id)
+        assert len(events) == 1
+        assert events[0].status == "unknown"
+
+        # Counters preserved: cost_reserved_micros preserved, cost_micros remains 0
+        ctr = repo.get_counter(
+            scope="user",
+            scope_key=str(user_id),
+            window_kind="day",
+            window_start=day_start,
+        )
+        assert ctr is not None
+        assert ctr.calls_reserved == 1
+        assert ctr.calls_settled == 0
+        assert ctr.cost_reserved_micros == cost_reserved
+        assert ctr.cost_micros == 0
+
+
+def test_reconciliation_repeat_idempotency(
+    pg_session_factory: sessionmaker[Session],
+) -> None:
+    """S1: Running reconciliation repeatedly produces zero duplicate operations."""
+    settings = _make_test_settings(llm_reconciliation_stale_seconds=300)
+    reconciler = LlmReconciliationService(
+        session_factory=pg_session_factory, settings=settings
+    )
+
+    now = datetime.now(UTC)
+    stale_time = now - timedelta(minutes=10)
+
+    with pg_session_factory() as session:
+        user_model, _ = _create_user(session)
+        repo = LlmUsageRepository(session)
+        repo.create_reservation(
+            user_id=user_model.id,
+            request_id=uuid4(),
+            call_kind="guard",
+            provider="openrouter",
+            cost_reserved_micros=15000,
+            created_at=stale_time,
+        )
+        session.commit()
+
+    run1 = reconciler.reconcile_stale_reservations(now=now)
+    assert run1.reconciled_reserved == 1
+
+    run2 = reconciler.reconcile_stale_reservations(now=now)
+    assert run2.reconciled_reserved == 0
+    assert run2.reconciled_started == 0
+    assert run2.returned_cost_micros == 0

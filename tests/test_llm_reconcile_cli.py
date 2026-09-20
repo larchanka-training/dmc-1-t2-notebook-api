@@ -53,3 +53,27 @@ def test_cli_main_runs_and_outputs_json(
     assert payload["reconciledStarted"] == 1
     assert payload["returnedCostMicros"] == 30000
     assert payload["dry_run"] is True
+
+
+def test_cli_main_rejects_non_positive_stale_seconds(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F3 Regression: CLI rejects negative and zero --stale-seconds with exit code 2."""
+    for invalid_val in ["-1", "0", "-300"]:
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["--stale-seconds", invalid_val])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "--stale-seconds must be a positive integer (> 0)" in err
+
+
+def test_cli_main_rejects_non_positive_limit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F3 Regression: CLI rejects negative and zero --limit with exit code 2."""
+    for invalid_val in ["-1", "0", "-100"]:
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["--limit", invalid_val])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "--limit must be a positive integer (> 0)" in err

@@ -66,10 +66,16 @@ class LlmReconciliationService:
             if stale_seconds is not None
             else self.settings.llm_reconciliation_stale_seconds
         )
-        cutoff = now_ts - timedelta(seconds=threshold)
+        if threshold <= 0:
+            raise ValueError("stale_seconds must be a positive integer (> 0)")
+
         batch_limit = (
             limit if limit is not None else self.settings.llm_reconciliation_batch_size
         )
+        if batch_limit <= 0:
+            raise ValueError("limit must be a positive integer (> 0)")
+
+        cutoff = now_ts - timedelta(seconds=threshold)
 
         with self.session_factory() as session:
             repo = LlmUsageRepository(session)

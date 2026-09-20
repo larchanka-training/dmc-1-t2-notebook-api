@@ -93,6 +93,46 @@ def enforce_llm_access(
     return current_user
 
 
+def enforce_llm_admin_access(
+    current_user: CurrentUser = Depends(get_current_user),
+) -> CurrentUser:
+    """Restrict LLM admin operations to configured administrators.
+
+    Fail-closed policy:
+    1. If user has 'admin' in current_user.roles, access is granted.
+    2. Otherwise, check settings.llm_admin_email_set, falling back to
+       settings.llm_allowed_email_set.
+    3. If the resolved admin allowlist is empty or whitespace, access is DENIED (HTTP 403).
+       Unlike generation access (where empty means unrestricted public generation),
+       admin routes (global telemetry, background reconciliation) are never open
+       to unallowlisted users.
+    4. If the caller's email is not in the allowlist, access is DENIED (HTTP 403).
+    """
+    if "admin" in (current_user.roles or []):
+        return current_user
+
+    allowed = settings.llm_admin_email_set or settings.llm_allowed_email_set
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "llm_admin_access_denied",
+                "message": "LLM admin operations are limited to allowlisted administrator accounts",
+            },
+        )
+
+    email = (current_user.email or "").strip().lower()
+    if not email or email not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "llm_admin_access_denied",
+                "message": "LLM admin operations are limited to allowlisted administrator accounts",
+            },
+        )
+    return current_user
+
+
 def enforce_llm_rate_limit(
     current_user: CurrentUser = Depends(get_current_user),
     limiter: InMemoryRateLimiter = Depends(get_rate_limiter),

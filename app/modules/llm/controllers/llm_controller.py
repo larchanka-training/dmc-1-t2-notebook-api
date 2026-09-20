@@ -10,6 +10,7 @@ from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.schemas.user_schemas import CurrentUser
 from app.modules.llm.dependencies import (
     enforce_llm_access,
+    enforce_llm_admin_access,
     enforce_llm_body_size,
     enforce_llm_rate_limit,
     get_llm_generation_service,
@@ -157,14 +158,14 @@ def get_user_usage(
         },
         403: {
             "model": ApiErrorResponse,
-            "description": "Account is not on the cloud LLM allowlist",
+            "description": "Account is not authorized for LLM administrative operations",
         },
     },
     status_code=status.HTTP_200_OK,
     summary="Get global LLM usage and debug telemetry",
 )
 def get_admin_usage(
-    _access: CurrentUser = Depends(enforce_llm_access),
+    _access: CurrentUser = Depends(enforce_llm_admin_access),
     service: LlmUsageService = Depends(get_llm_usage_service),
 ) -> LlmAdminUsageResponse:
     """Return global usage counters, monthly cost ceiling, and recent activity."""
@@ -181,14 +182,14 @@ def get_admin_usage(
         },
         403: {
             "model": ApiErrorResponse,
-            "description": "Account is not on the cloud LLM allowlist",
+            "description": "Account is not authorized for LLM administrative operations",
         },
     },
     status_code=status.HTTP_200_OK,
     summary="Trigger stale reservation reconciliation",
 )
 def reconcile_stale_reservations(
-    _access: CurrentUser = Depends(enforce_llm_access),
+    _access: CurrentUser = Depends(enforce_llm_admin_access),
     service: LlmReconciliationService = Depends(get_llm_reconciliation_service),
 ) -> LlmReconciliationSummary:
     """Run on-demand background reconciliation of orphaned reservations."""

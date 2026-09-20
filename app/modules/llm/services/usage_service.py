@@ -699,11 +699,10 @@ class LlmUsageService:
             window_start=day_start,
             calls_reserved=day_counter.calls_reserved if day_counter else 0,
             calls_settled=day_counter.calls_settled if day_counter else 0,
-            calls_total=(
-                (day_counter.calls_reserved + day_counter.calls_settled)
-                if day_counter
-                else 0
-            ),
+            # In the Step 8e quota model (§4.3, §5.1), calls_reserved tracks all calls admitted
+            # into the window and is never decremented on settle. calls_settled tracks completed
+            # calls. The total calls counted against quota is therefore calls_reserved.
+            calls_total=day_counter.calls_reserved if day_counter else 0,
             call_limit=user_daily_limit,
             cost_reserved_micros=day_counter.cost_reserved_micros if day_counter else 0,
             cost_micros=day_counter.cost_micros if day_counter else 0,
@@ -723,11 +722,7 @@ class LlmUsageService:
             window_start=month_start,
             calls_reserved=month_counter.calls_reserved if month_counter else 0,
             calls_settled=month_counter.calls_settled if month_counter else 0,
-            calls_total=(
-                (month_counter.calls_reserved + month_counter.calls_settled)
-                if month_counter
-                else 0
-            ),
+            calls_total=month_counter.calls_reserved if month_counter else 0,
             call_limit=user_monthly_limit,
             cost_reserved_micros=month_counter.cost_reserved_micros
             if month_counter
@@ -825,9 +820,7 @@ class LlmUsageService:
             else 0,
             calls_settled=global_day_counter.calls_settled if global_day_counter else 0,
             calls_total=(
-                (global_day_counter.calls_reserved + global_day_counter.calls_settled)
-                if global_day_counter
-                else 0
+                global_day_counter.calls_reserved if global_day_counter else 0
             ),
             call_limit=self.settings.llm_global_daily_calls,
             cost_reserved_micros=global_day_counter.cost_reserved_micros
@@ -858,12 +851,7 @@ class LlmUsageService:
             if global_month_counter
             else 0,
             calls_total=(
-                (
-                    global_month_counter.calls_reserved
-                    + global_month_counter.calls_settled
-                )
-                if global_month_counter
-                else 0
+                global_month_counter.calls_reserved if global_month_counter else 0
             ),
             call_limit=None,
             cost_reserved_micros=global_month_counter.cost_reserved_micros

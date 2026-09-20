@@ -1731,7 +1731,7 @@
       "name": "MIT"
     },
     "title": "JS Notebook API",
-    "version": "0.3.0"
+    "version": "0.3.1"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -2215,7 +2215,7 @@
                 }
               }
             },
-            "description": "Account is not on the cloud LLM allowlist"
+            "description": "Account is not authorized for LLM administrative operations"
           }
         },
         "security": [
@@ -2262,7 +2262,7 @@
                 }
               }
             },
-            "description": "Account is not on the cloud LLM allowlist"
+            "description": "Account is not authorized for LLM administrative operations"
           }
         },
         "security": [

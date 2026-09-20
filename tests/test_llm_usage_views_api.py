@@ -145,16 +145,105 @@ def test_get_admin_usage_forbidden_for_non_allowlisted(client: TestClient) -> No
     headers, _ = _login(client, email="regular-user@example.com")
 
     # Temporarily set allowlist
+    original_admin = app_settings.llm_admin_emails
     original_allowed = app_settings.llm_allowed_emails
+    app_settings.llm_admin_emails = ""
     app_settings.llm_allowed_emails = "dev@example.com"
     try:
         response = client.get(
             f"{app_settings.api_prefix}/llm/admin/usage", headers=headers
         )
         assert response.status_code == 403
-        assert response.json()["error"]["code"] == "llm_access_denied"
+        assert response.json()["error"]["code"] == "llm_admin_access_denied"
     finally:
+        app_settings.llm_admin_emails = original_admin
         app_settings.llm_allowed_emails = original_allowed
+
+
+def test_admin_endpoints_fail_closed_when_allowlist_is_empty(
+    client: TestClient,
+) -> None:
+    """F1 Regression: Admin routes return 403 when allowlists are empty (fail-closed)."""
+    headers, _ = _login(client, email="any-authenticated-user@example.com")
+
+    original_admin = app_settings.llm_admin_emails
+    original_allowed = app_settings.llm_allowed_emails
+    app_settings.llm_admin_emails = ""
+    app_settings.llm_allowed_emails = ""
+    try:
+        # GET /admin/usage returns 403
+        res_get = client.get(
+            f"{app_settings.api_prefix}/llm/admin/usage", headers=headers
+        )
+        assert res_get.status_code == 403
+        assert res_get.json()["error"]["code"] == "llm_admin_access_denied"
+
+        # POST /admin/reconcile returns 403
+        res_post = client.post(
+            f"{app_settings.api_prefix}/llm/admin/reconcile", headers=headers
+        )
+        assert res_post.status_code == 403
+        assert res_post.json()["error"]["code"] == "llm_admin_access_denied"
+
+        # Even with whitespace-only allowlist
+        app_settings.llm_admin_emails = "   "
+        app_settings.llm_allowed_emails = " ,  "
+        res_ws = client.get(
+            f"{app_settings.api_prefix}/llm/admin/usage", headers=headers
+        )
+        assert res_ws.status_code == 403
+        assert res_ws.json()["error"]["code"] == "llm_admin_access_denied"
+    finally:
+        app_settings.llm_admin_emails = original_admin
+        app_settings.llm_allowed_emails = original_allowed
+
+
+def test_admin_endpoints_accessible_via_dedicated_admin_emails(
+    client: TestClient,
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    """F1: Admin routes return 200 when user is in LLM_ADMIN_EMAILS (even if LLM_ALLOWED_EMAILS is empty)."""
+    admin_email = "superadmin@example.com"
+    headers, _ = _login(client, email=admin_email)
+
+    original_admin = app_settings.llm_admin_emails
+    original_allowed = app_settings.llm_allowed_emails
+    app_settings.llm_admin_emails = f"other@example.com, {admin_email}"
+    app_settings.llm_allowed_emails = ""  # Public generation, but private admin!
+
+    test_settings = Settings(
+        _env_file=None,
+        app_env="dev",
+        jwt_secret="x" * 32,
+        otp_hash_secret="y" * 32,
+        llm_admin_emails=app_settings.llm_admin_emails,
+        llm_allowed_emails="",
+    )
+    usage_svc = LlmUsageService(
+        session_factory=db_session_factory, settings=test_settings
+    )
+    reconciler = LlmReconciliationService(
+        session_factory=db_session_factory, settings=test_settings
+    )
+    app.dependency_overrides[get_llm_usage_service] = lambda: usage_svc
+    app.dependency_overrides[get_llm_reconciliation_service] = lambda: reconciler
+
+    try:
+        res_get = client.get(
+            f"{app_settings.api_prefix}/llm/admin/usage", headers=headers
+        )
+        assert res_get.status_code == 200
+
+        headers_post, _ = _login(client, email=admin_email)
+        res_post = client.post(
+            f"{app_settings.api_prefix}/llm/admin/reconcile", headers=headers_post
+        )
+        assert res_post.status_code == 200
+    finally:
+        app_settings.llm_admin_emails = original_admin
+        app_settings.llm_allowed_emails = original_allowed
+        app.dependency_overrides.pop(get_llm_usage_service, None)
+        app.dependency_overrides.pop(get_llm_reconciliation_service, None)
 
 
 def test_get_admin_usage_success_for_allowlisted(
@@ -306,3 +395,97 @@ def test_post_admin_reconcile_api(
     finally:
         app_settings.llm_allowed_emails = original_allowed
         app.dependency_overrides.pop(get_llm_reconciliation_service, None)
+
+
+def test_calls_total_after_settled_calls(
+    client: TestClient,
+    db_session_factory: sessionmaker[Session],
+) -> None:
+    """F2 Regression: Verify callsTotal does NOT double-count settled calls (reports 2, not 4)."""
+    admin_email = "f2-admin@example.com"
+    headers, user_id = _login(client, email=admin_email)
+
+    original_admin = app_settings.llm_admin_emails
+    app_settings.llm_admin_emails = admin_email
+
+    test_settings = Settings(
+        _env_file=None,
+        app_env="dev",
+        jwt_secret="x" * 32,
+        otp_hash_secret="y" * 32,
+        llm_admin_emails=admin_email,
+        llm_free_tier_daily_calls=50,
+        llm_global_daily_calls=500,
+    )
+    usage_svc = LlmUsageService(
+        session_factory=db_session_factory, settings=test_settings
+    )
+    app.dependency_overrides[get_llm_usage_service] = lambda: usage_svc
+
+    try:
+        now = datetime.now(UTC)
+        day_start, month_start = usage_svc.get_window_dates(now)
+
+        with db_session_factory() as session:
+            repo = LlmUsageRepository(session)
+            # Step 1: Reserve 2 calls (e.g. guard + generator)
+            for scope, scope_key in [("user", str(user_id)), ("global", "-")]:
+                repo.reserve_quota(
+                    scope=scope,
+                    scope_key=scope_key,
+                    window_kind="day",
+                    window_start=day_start,
+                    call_cost=2,
+                    cost_reserved_micros=10000,
+                )
+                repo.reserve_quota(
+                    scope=scope,
+                    scope_key=scope_key,
+                    window_kind="month",
+                    window_start=month_start,
+                    call_cost=2,
+                    cost_reserved_micros=10000,
+                )
+            # Step 2: Settle both calls (calls_settled becomes 2, cost moves to cost_micros)
+            for scope, scope_key in [("user", str(user_id)), ("global", "-")]:
+                for _ in range(2):
+                    repo.settle_quota(
+                        scope=scope,
+                        scope_key=scope_key,
+                        window_kind="day",
+                        window_start=day_start,
+                        cost_reserved_micros=5000,
+                        settled_cost_micros=4250,
+                    )
+                    repo.settle_quota(
+                        scope=scope,
+                        scope_key=scope_key,
+                        window_kind="month",
+                        window_start=month_start,
+                        cost_reserved_micros=5000,
+                        settled_cost_micros=4250,
+                    )
+            session.commit()
+
+        # Check User View: callsTotal must be 2, NOT 2 + 2 = 4
+        res_user = client.get(f"{app_settings.api_prefix}/llm/usage", headers=headers)
+        assert res_user.status_code == 200
+        user_data = res_user.json()
+        assert user_data["day"]["callsReserved"] == 2
+        assert user_data["day"]["callsSettled"] == 2
+        assert user_data["day"]["callsTotal"] == 2  # NOT 4!
+        assert user_data["month"]["callsTotal"] == 2
+
+        # Check Admin View: callsTotal must be 2, NOT 4
+        res_admin = client.get(
+            f"{app_settings.api_prefix}/llm/admin/usage", headers=headers
+        )
+        assert res_admin.status_code == 200
+        admin_data = res_admin.json()
+        assert admin_data["globalDay"]["callsReserved"] == 2
+        assert admin_data["globalDay"]["callsSettled"] == 2
+        assert admin_data["globalDay"]["callsTotal"] == 2  # NOT 4!
+        assert admin_data["globalMonth"]["callsTotal"] == 2
+    finally:
+        app_settings.llm_admin_emails = original_admin
+        app.dependency_overrides.pop(get_llm_usage_service, None)

@@ -108,3 +108,20 @@ def test_llm_usage_settings_validations(
         monkeypatch.setenv(key, value)
     with pytest.raises(ValueError, match=expected_msg):
         Settings(_env_file=None)
+
+
+def test_llm_admin_emails_parsing() -> None:
+    """Verify parsing and normalization of LLM_ADMIN_EMAILS."""
+    s1 = Settings(_env_file=None, llm_admin_emails="")
+    assert s1.llm_admin_email_set == frozenset()
+
+    s2 = Settings(_env_file=None, llm_admin_emails="   ,  ")
+    assert s2.llm_admin_email_set == frozenset()
+
+    s3 = Settings(
+        _env_file=None,
+        llm_admin_emails=" Admin1@example.com, admin2@EXAMPLE.COM , , admin1@example.com ",
+    )
+    assert s3.llm_admin_email_set == frozenset(
+        {"admin1@example.com", "admin2@example.com"}
+    )
