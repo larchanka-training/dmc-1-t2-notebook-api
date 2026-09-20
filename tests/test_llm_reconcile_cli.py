@@ -165,7 +165,7 @@ def test_cli_main_on_postgresql_dry_run_preserves_state_and_counters(
     monkeypatch.setattr(cli, "get_session_factory", lambda: pg_session_factory)
     test_settings = Settings(
         _env_file=None,
-        jwt_secret_key="x" * 32,
+        jwt_secret="x" * 32,
         llm_admin_emails="admin@example.com",
         llm_reconciliation_stale_seconds=300,
     )
