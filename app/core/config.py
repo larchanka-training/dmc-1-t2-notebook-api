@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     """
 
     app_name: str = "JS Notebook API"
-    app_version: str = "0.2.0"
+    app_version: str = "0.3.0"
     app_env: str = "dev"
     api_prefix: str = "/api/v1"
     app_host: str = "0.0.0.0"
@@ -120,12 +120,19 @@ class Settings(BaseSettings):
     llm_global_daily_calls: int = 1000
     llm_global_monthly_cost_ceiling_micros: int = 100_000_000  # $100 in micros
     # Conservative price modeling parameters for reserved upper bound.
-    llm_worst_case_price_micros_prompt: int = 5_000  # $5 / 1M = 5,000 micros / 1K tokens
-    llm_worst_case_price_micros_completion: int = 15_000  # $15 / 1M = 15,000 micros / 1K tokens
+    llm_worst_case_price_micros_prompt: int = (
+        5_000  # $5 / 1M = 5,000 micros / 1K tokens
+    )
+    llm_worst_case_price_micros_completion: int = (
+        15_000  # $15 / 1M = 15,000 micros / 1K tokens
+    )
     llm_system_prompt_allowance_tokens: int = 1_000
     llm_guard_output_tokens_max: int = 100
     # Maximum size in bytes for compiler/syntax validation error text passed to repair prompts.
     llm_validation_error_max_bytes: int = 2_048
+    # Stale reservation reconciliation settings (Step 8e-3, docs/llm-usage-controls.md §5.3, §10).
+    llm_reconciliation_stale_seconds: int = 300  # 5 minutes
+    llm_reconciliation_batch_size: int = 100
     # Backend code-execution endpoint (POST /api/v1/execute). Disabled by
     # default: it is a debug/fallback runner, not the production sandbox.
     # See docs/execution-architecture.md §12. The subprocess runner is NOT a
@@ -223,7 +230,9 @@ class Settings(BaseSettings):
         if self.llm_max_total_bytes <= 0:
             raise ValueError("LLM_MAX_TOTAL_BYTES must be positive")
         if self.llm_max_total_bytes < self.llm_max_prompt_bytes:
-            raise ValueError("LLM_MAX_TOTAL_BYTES must be greater than or equal to LLM_MAX_PROMPT_BYTES")
+            raise ValueError(
+                "LLM_MAX_TOTAL_BYTES must be greater than or equal to LLM_MAX_PROMPT_BYTES"
+            )
         if self.llm_rate_limit_per_minute <= 0:
             raise ValueError("LLM_RATE_LIMIT_PER_MINUTE must be positive")
         if self.llm_validation_max_retries < 0:
@@ -271,6 +280,10 @@ class Settings(BaseSettings):
             raise ValueError("LLM_GUARD_OUTPUT_TOKENS_MAX must be positive")
         if self.llm_validation_error_max_bytes <= 0:
             raise ValueError("LLM_VALIDATION_ERROR_MAX_BYTES must be positive")
+        if self.llm_reconciliation_stale_seconds <= 0:
+            raise ValueError("LLM_RECONCILIATION_STALE_SECONDS must be positive")
+        if self.llm_reconciliation_batch_size <= 0:
+            raise ValueError("LLM_RECONCILIATION_BATCH_SIZE must be positive")
         if self.execute_default_timeout_ms <= 0:
             raise ValueError("EXECUTE_DEFAULT_TIMEOUT_MS must be positive")
         if self.execute_max_timeout_ms <= 0:
@@ -308,9 +321,7 @@ class Settings(BaseSettings):
                     raise ValueError(f"{field_name} must not be blank")
         if self.llm_context_summary_strategy.strip() not in ALLOWED_SUMMARY_STRATEGIES:
             allowed = ", ".join(sorted(ALLOWED_SUMMARY_STRATEGIES))
-            raise ValueError(
-                f"LLM_CONTEXT_SUMMARY_STRATEGY must be one of: {allowed}"
-            )
+            raise ValueError(f"LLM_CONTEXT_SUMMARY_STRATEGY must be one of: {allowed}")
 
         if self.is_production_like:
             if not self.llm_bedrock_skip_eu_check:

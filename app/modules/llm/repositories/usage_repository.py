@@ -116,9 +116,7 @@ class LlmUsageRepository:
         )
         return list(self.db.execute(statement).scalars().all())
 
-    def get_reservations_by_user_id(
-        self, user_id: UUID
-    ) -> list[LlmUsageReservation]:
+    def get_reservations_by_user_id(self, user_id: UUID) -> list[LlmUsageReservation]:
         """Fetch all reservations for a given user_id in creation order."""
         statement = (
             select(LlmUsageReservation)
@@ -213,6 +211,30 @@ class LlmUsageRepository:
             self._refresh_loaded_reservation(reservation_id)
         return updated
 
+    def get_stale_reservations(
+        self, cutoff: datetime, limit: int = 100
+    ) -> list[LlmUsageReservation]:
+        """Fetch reservations in 'reserved' or 'started' state older than cutoff."""
+        statement = (
+            select(LlmUsageReservation)
+            .where(
+                LlmUsageReservation.state.in_(["reserved", "started"]),
+                LlmUsageReservation.created_at <= cutoff,
+            )
+            .order_by(LlmUsageReservation.created_at.asc())
+            .limit(limit)
+        )
+        return list(self.db.execute(statement).scalars().all())
+
+    def get_recent_reservations(self, limit: int = 50) -> list[LlmUsageReservation]:
+        """Fetch most recent reservations in reverse chronological order."""
+        statement = (
+            select(LlmUsageReservation)
+            .order_by(LlmUsageReservation.created_at.desc())
+            .limit(limit)
+        )
+        return list(self.db.execute(statement).scalars().all())
+
     # -------------------------------------------------------------------------
     # Ledger Events
     # -------------------------------------------------------------------------
@@ -271,6 +293,13 @@ class LlmUsageRepository:
             .order_by(LlmUsageEvent.created_at.desc())
             .limit(limit)
             .offset(offset)
+        )
+        return list(self.db.execute(statement).scalars().all())
+
+    def get_recent_events(self, limit: int = 50) -> list[LlmUsageEvent]:
+        """Fetch most recent events in reverse chronological order."""
+        statement = (
+            select(LlmUsageEvent).order_by(LlmUsageEvent.created_at.desc()).limit(limit)
         )
         return list(self.db.execute(statement).scalars().all())
 
@@ -441,3 +470,17 @@ class LlmUsageRepository:
             (scope, scope_key, window_kind, window_start),
             populate_existing=True,
         )
+
+    def get_counters_by_scope(
+        self, scope: str, scope_key: str
+    ) -> list[LlmUsageCounter]:
+        """Fetch all counter rows for a given scope and scope_key."""
+        statement = (
+            select(LlmUsageCounter)
+            .where(
+                LlmUsageCounter.scope == scope,
+                LlmUsageCounter.scope_key == scope_key,
+            )
+            .order_by(LlmUsageCounter.window_start.desc())
+        )
+        return list(self.db.execute(statement).scalars().all())
