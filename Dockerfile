@@ -43,6 +43,7 @@ RUN addgroup --system app && adduser --system --ingroup app app
 COPY --from=builder /install /usr/local
 COPY --from=esbuild /usr/local/bin/esbuild /usr/local/bin/esbuild
 COPY app ./app
+COPY scripts ./scripts
 
 USER app
 

@@ -29,20 +29,34 @@ def test_llm_usage_settings_defaults() -> None:
     assert settings.llm_worst_case_price_micros_completion == 15_000
     assert settings.llm_system_prompt_allowance_tokens == 1_000
     assert settings.llm_guard_output_tokens_max == 100
+    assert settings.llm_reconciliation_stale_seconds == 300
+    assert settings.llm_reconciliation_batch_size == 100
 
 
 @pytest.mark.parametrize(
     ("env_key", "env_val", "expected_msg"),
     [
-        ("LLM_FREE_TIER_DAILY_CALLS", "0", "LLM_FREE_TIER_DAILY_CALLS must be positive"),
-        ("LLM_FREE_TIER_MONTHLY_CALLS", "0", "LLM_FREE_TIER_MONTHLY_CALLS must be positive"),
+        (
+            "LLM_FREE_TIER_DAILY_CALLS",
+            "0",
+            "LLM_FREE_TIER_DAILY_CALLS must be positive",
+        ),
+        (
+            "LLM_FREE_TIER_MONTHLY_CALLS",
+            "0",
+            "LLM_FREE_TIER_MONTHLY_CALLS must be positive",
+        ),
         (
             "LLM_FREE_TIER_MONTHLY_CALLS",
             "10",  # less than daily (20)
             "LLM_FREE_TIER_MONTHLY_CALLS must be greater than or equal to",
         ),
         ("LLM_DEV_TIER_DAILY_CALLS", "0", "LLM_DEV_TIER_DAILY_CALLS must be positive"),
-        ("LLM_DEV_TIER_MONTHLY_CALLS", "0", "LLM_DEV_TIER_MONTHLY_CALLS must be positive"),
+        (
+            "LLM_DEV_TIER_MONTHLY_CALLS",
+            "0",
+            "LLM_DEV_TIER_MONTHLY_CALLS must be positive",
+        ),
         (
             "LLM_DEV_TIER_MONTHLY_CALLS",
             "50",  # less than daily (100)
@@ -74,6 +88,16 @@ def test_llm_usage_settings_defaults() -> None:
             "0",
             "LLM_GUARD_OUTPUT_TOKENS_MAX must be positive",
         ),
+        (
+            "LLM_RECONCILIATION_STALE_SECONDS",
+            "0",
+            "LLM_RECONCILIATION_STALE_SECONDS must be positive",
+        ),
+        (
+            "LLM_RECONCILIATION_BATCH_SIZE",
+            "0",
+            "LLM_RECONCILIATION_BATCH_SIZE must be positive",
+        ),
     ],
 )
 def test_llm_usage_settings_validations(
@@ -84,3 +108,20 @@ def test_llm_usage_settings_validations(
         monkeypatch.setenv(key, value)
     with pytest.raises(ValueError, match=expected_msg):
         Settings(_env_file=None)
+
+
+def test_llm_admin_emails_parsing() -> None:
+    """Verify parsing and normalization of LLM_ADMIN_EMAILS."""
+    s1 = Settings(_env_file=None, llm_admin_emails="")
+    assert s1.llm_admin_email_set == frozenset()
+
+    s2 = Settings(_env_file=None, llm_admin_emails="   ,  ")
+    assert s2.llm_admin_email_set == frozenset()
+
+    s3 = Settings(
+        _env_file=None,
+        llm_admin_emails=" Admin1@example.com, admin2@EXAMPLE.COM , , admin1@example.com ",
+    )
+    assert s3.llm_admin_email_set == frozenset(
+        {"admin1@example.com", "admin2@example.com"}
+    )

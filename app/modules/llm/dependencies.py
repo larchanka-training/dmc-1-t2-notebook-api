@@ -3,6 +3,7 @@
 from fastapi import Depends, HTTPException, Request, status
 
 from app.core.config import settings
+from app.core.db import get_session_factory
 from app.core.request_limits import enforce_body_size
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.schemas.user_schemas import CurrentUser
@@ -11,6 +12,8 @@ from app.modules.llm.services.generation_service import (
     build_generation_service,
 )
 from app.modules.llm.services.rate_limiter import InMemoryRateLimiter
+from app.modules.llm.services.reconciliation_service import LlmReconciliationService
+from app.modules.llm.services.usage_service import LlmUsageService
 
 _rate_limiter = InMemoryRateLimiter(
     limit=settings.llm_rate_limit_per_minute,
@@ -21,6 +24,18 @@ _rate_limiter = InMemoryRateLimiter(
 def get_llm_generation_service() -> LlmGenerationService:
     """Return the configured LLM generation service."""
     return build_generation_service()
+
+
+def get_llm_usage_service() -> LlmUsageService:
+    """Return the configured LLM usage service."""
+    return LlmUsageService(session_factory=get_session_factory(), settings=settings)
+
+
+def get_llm_reconciliation_service() -> LlmReconciliationService:
+    """Return the configured LLM reconciliation service."""
+    return LlmReconciliationService(
+        session_factory=get_session_factory(), settings=settings
+    )
 
 
 def get_rate_limiter() -> InMemoryRateLimiter:
@@ -73,6 +88,46 @@ def enforce_llm_access(
             detail={
                 "code": "llm_access_denied",
                 "message": "Cloud LLM generation is limited to allowlisted accounts",
+            },
+        )
+    return current_user
+
+
+def enforce_llm_admin_access(
+    current_user: CurrentUser = Depends(get_current_user),
+) -> CurrentUser:
+    """Restrict LLM admin operations to configured administrators.
+
+    Fail-closed policy:
+    1. If user has 'admin' in current_user.roles, access is granted.
+    2. Otherwise, check settings.llm_admin_email_set, falling back to
+       settings.llm_allowed_email_set.
+    3. If the resolved admin allowlist is empty or whitespace, access is DENIED (HTTP 403).
+       Unlike generation access (where empty means unrestricted public generation),
+       admin routes (global telemetry, background reconciliation) are never open
+       to unallowlisted users.
+    4. If the caller's email is not in the allowlist, access is DENIED (HTTP 403).
+    """
+    if "admin" in (current_user.roles or []):
+        return current_user
+
+    allowed = settings.llm_admin_email_set or settings.llm_allowed_email_set
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "llm_admin_access_denied",
+                "message": "LLM admin operations are limited to allowlisted administrator accounts",
+            },
+        )
+
+    email = (current_user.email or "").strip().lower()
+    if not email or email not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "llm_admin_access_denied",
+                "message": "LLM admin operations are limited to allowlisted administrator accounts",
             },
         )
     return current_user

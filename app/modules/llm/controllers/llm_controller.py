@@ -6,16 +6,28 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.config import settings
 from app.core.errors import ApiErrorResponse
+from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.schemas.user_schemas import CurrentUser
 from app.modules.llm.dependencies import (
     enforce_llm_access,
+    enforce_llm_admin_access,
     enforce_llm_body_size,
     enforce_llm_rate_limit,
     get_llm_generation_service,
+    get_llm_reconciliation_service,
+    get_llm_usage_service,
 )
-from app.modules.llm.schemas.llm_schemas import GenerateRequest, GenerateResponse
+from app.modules.llm.schemas.llm_schemas import (
+    GenerateRequest,
+    GenerateResponse,
+    LlmAdminUsageResponse,
+    LlmReconciliationSummary,
+    LlmUserUsageResponse,
+)
 from app.modules.llm.services.errors import LlmServiceError, LlmTimeoutError
 from app.modules.llm.services.generation_service import LlmGenerationService
+from app.modules.llm.services.reconciliation_service import LlmReconciliationService
+from app.modules.llm.services.usage_service import LlmUsageService
 
 router = APIRouter(prefix="/llm", tags=["LLM"])
 
@@ -24,7 +36,9 @@ router = APIRouter(prefix="/llm", tags=["LLM"])
 # Bedrock and esbuild calls the orchestrator chained internally. The worker
 # count is small on purpose: each ``/llm/generate`` already burns one of
 # Starlette's threadpool workers, and Bedrock calls are billed.
-_PIPELINE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm-pipeline")
+_PIPELINE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="llm-pipeline"
+)
 
 
 @router.post(
@@ -112,3 +126,71 @@ def generate_code(
         ) from exc
 
     return result
+
+
+@router.get(
+    "/usage",
+    response_model=LlmUserUsageResponse,
+    responses={
+        401: {
+            "model": ApiErrorResponse,
+            "description": "Missing or invalid access token",
+        },
+    },
+    status_code=status.HTTP_200_OK,
+    summary="Get current user LLM usage and quotas",
+)
+def get_user_usage(
+    current_user: CurrentUser = Depends(get_current_user),
+    service: LlmUsageService = Depends(get_llm_usage_service),
+) -> LlmUserUsageResponse:
+    """Return caller's usage counters, active limits, and reset times for day and month windows."""
+    return service.get_user_usage(current_user)
+
+
+@router.get(
+    "/admin/usage",
+    response_model=LlmAdminUsageResponse,
+    responses={
+        401: {
+            "model": ApiErrorResponse,
+            "description": "Missing or invalid access token",
+        },
+        403: {
+            "model": ApiErrorResponse,
+            "description": "Account is not authorized for LLM administrative operations",
+        },
+    },
+    status_code=status.HTTP_200_OK,
+    summary="Get global LLM usage and debug telemetry",
+)
+def get_admin_usage(
+    _access: CurrentUser = Depends(enforce_llm_admin_access),
+    service: LlmUsageService = Depends(get_llm_usage_service),
+) -> LlmAdminUsageResponse:
+    """Return global usage counters, monthly cost ceiling, and recent activity."""
+    return service.get_admin_usage()
+
+
+@router.post(
+    "/admin/reconcile",
+    response_model=LlmReconciliationSummary,
+    responses={
+        401: {
+            "model": ApiErrorResponse,
+            "description": "Missing or invalid access token",
+        },
+        403: {
+            "model": ApiErrorResponse,
+            "description": "Account is not authorized for LLM administrative operations",
+        },
+    },
+    status_code=status.HTTP_200_OK,
+    summary="Trigger stale reservation reconciliation",
+)
+def reconcile_stale_reservations(
+    _access: CurrentUser = Depends(enforce_llm_admin_access),
+    service: LlmReconciliationService = Depends(get_llm_reconciliation_service),
+) -> LlmReconciliationSummary:
+    """Run on-demand background reconciliation of orphaned reservations."""
+    return service.reconcile_stale_reservations()

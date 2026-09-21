@@ -1,5 +1,6 @@
-"""Pydantic schemas for the Cloud LLM generation endpoint."""
+"""Pydantic schemas for the Cloud LLM generation endpoint, usage views, and reconciliation."""
 
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -41,7 +42,9 @@ class GenerateRequest(BaseModel):
     mode: Literal["generate", "edit"] = "generate"
     language: Literal["javascript", "typescript"] = "javascript"
     notebook_title: str | None = Field(default=None, max_length=200)
-    context: list[LlmContextCell] = Field(default_factory=list, max_length=MAX_CONTEXT_ITEMS)
+    context: list[LlmContextCell] = Field(
+        default_factory=list, max_length=MAX_CONTEXT_ITEMS
+    )
     base_code: str | None = Field(default=None, max_length=MAX_BASE_CODE_LENGTH)
 
     @model_validator(mode="after")
@@ -82,3 +85,92 @@ class GenerateResponse(BaseModel):
     tier: Literal["backend"] = "backend"
     tokens: TokenUsage = Field(default_factory=TokenUsage)
     request_id: UUID
+
+
+class LlmQuotaWindowView(BaseModel):
+    """Aggregated quota and usage view for a scope and time window."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    scope: Literal["user", "global"]
+    window_kind: Literal["day", "month"]
+    window_start: date
+    calls_reserved: int
+    calls_settled: int
+    calls_total: int
+    call_limit: int | None = None
+    cost_reserved_micros: int
+    cost_micros: int
+    cost_total_micros: int
+    cost_limit_micros: int | None = None
+    resets_at: datetime
+    retry_after: int
+
+
+class LlmUserUsageResponse(BaseModel):
+    """User-facing usage and quota view for daily and monthly windows."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    user_id: UUID
+    tier: str
+    day: LlmQuotaWindowView
+    month: LlmQuotaWindowView
+
+
+class LlmReservationSummary(BaseModel):
+    """Summary of an LLM usage reservation for admin and debug inspection."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    id: UUID
+    user_id: UUID
+    request_id: UUID
+    call_kind: str
+    provider: str
+    state: str
+    cost_reserved_micros: int
+    created_at: datetime
+    started_at: datetime | None = None
+    closed_at: datetime | None = None
+
+
+class LlmEventSummary(BaseModel):
+    """Summary of an LLM usage ledger event for admin and debug inspection."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    id: UUID
+    user_id: UUID
+    request_id: UUID
+    reservation_id: UUID
+    call_kind: str
+    provider: str
+    model_id: str | None = None
+    status: str
+    prompt_tokens: int
+    completion_tokens: int
+    estimated_cost_micros: int
+    created_at: datetime
+
+
+class LlmAdminUsageResponse(BaseModel):
+    """Admin and debug usage inspection view."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    global_day: LlmQuotaWindowView
+    global_month: LlmQuotaWindowView
+    recent_reservations: list[LlmReservationSummary]
+    recent_events: list[LlmEventSummary]
+
+
+class LlmReconciliationSummary(BaseModel):
+    """Result summary of a stale reservation reconciliation run."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    reconciled_reserved: int
+    reconciled_started: int
+    returned_cost_micros: int
+    cutoff: datetime

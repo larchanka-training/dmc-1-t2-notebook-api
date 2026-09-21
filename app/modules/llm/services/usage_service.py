@@ -21,6 +21,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings, settings as app_settings
 from app.modules.auth.schemas.user_schemas import CurrentUser
 from app.modules.llm.repositories import LlmUsageRepository
+from app.modules.llm.schemas.llm_schemas import (
+    LlmAdminUsageResponse,
+    LlmEventSummary,
+    LlmQuotaWindowView,
+    LlmReservationSummary,
+    LlmUserUsageResponse,
+)
 from app.modules.llm.services.errors import (
     CodeValidationError,
     LlmProviderNotConfiguredError,
@@ -79,8 +86,8 @@ class LlmUsageService:
         return day_start, month_start
 
     @staticmethod
-    def calculate_retry_after(window_kind: str, now: datetime | None = None) -> int:
-        """Calculate seconds to the next UTC window boundary."""
+    def calculate_resets_at(window_kind: str, now: datetime | None = None) -> datetime:
+        """Calculate next UTC window boundary datetime."""
         if now is None:
             now_ts = datetime.now(UTC)
         elif now.tzinfo is None:
@@ -88,14 +95,26 @@ class LlmUsageService:
         else:
             now_ts = now.astimezone(UTC)
         if window_kind == "day":
-            tomorrow = datetime(now_ts.year, now_ts.month, now_ts.day, tzinfo=UTC) + timedelta(days=1)
-            return max(1, int((tomorrow - now_ts).total_seconds()))
-        # month
+            return datetime(
+                now_ts.year, now_ts.month, now_ts.day, tzinfo=UTC
+            ) + timedelta(days=1)
         if now_ts.month == 12:
-            next_month = datetime(now_ts.year + 1, 1, 1, tzinfo=UTC)
+            return datetime(now_ts.year + 1, 1, 1, tzinfo=UTC)
+        return datetime(now_ts.year, now_ts.month + 1, 1, tzinfo=UTC)
+
+    @classmethod
+    def calculate_retry_after(
+        cls, window_kind: str, now: datetime | None = None
+    ) -> int:
+        """Calculate seconds to the next UTC window boundary."""
+        if now is None:
+            now_ts = datetime.now(UTC)
+        elif now.tzinfo is None:
+            now_ts = now.replace(tzinfo=UTC)
         else:
-            next_month = datetime(now_ts.year, now_ts.month + 1, 1, tzinfo=UTC)
-        return max(1, int((next_month - now_ts).total_seconds()))
+            now_ts = now.astimezone(UTC)
+        resets_at = cls.calculate_resets_at(window_kind, now_ts)
+        return max(1, int((resets_at - now_ts).total_seconds()))
 
     def resolve_user_limits(
         self,
@@ -109,7 +128,9 @@ class LlmUsageService:
         now_ts = datetime.now(UTC)
 
         if entitlement is not None:
-            is_valid = entitlement.valid_until is None or entitlement.valid_until > now_ts
+            is_valid = (
+                entitlement.valid_until is None or entitlement.valid_until > now_ts
+            )
             if is_valid:
                 tier_daily = (
                     self.settings.llm_dev_tier_daily_calls
@@ -276,7 +297,16 @@ class LlmUsageService:
                 ),
             ]
 
-            for scope, scope_key, window_kind, window_start, call_cost, cost_micros, call_lim, cost_lim in targets:
+            for (
+                scope,
+                scope_key,
+                window_kind,
+                window_start,
+                call_cost,
+                cost_micros,
+                call_lim,
+                cost_lim,
+            ) in targets:
                 admitted = repo.reserve_quota(
                     scope=scope,
                     scope_key=scope_key,
@@ -395,7 +425,16 @@ class LlmUsageService:
                 ),
             ]
 
-            for scope, scope_key, window_kind, window_start, call_cost, cost_micros, call_lim, cost_lim in targets:
+            for (
+                scope,
+                scope_key,
+                window_kind,
+                window_start,
+                call_cost,
+                cost_micros,
+                call_lim,
+                cost_lim,
+            ) in targets:
                 admitted = repo.reserve_quota(
                     scope=scope,
                     scope_key=scope_key,
@@ -592,3 +631,249 @@ class LlmUsageService:
 
         for res_id in reserved_ids:
             self.release_reservation(reservation_id=res_id, user_id=user_id)
+
+    # -------------------------------------------------------------------------
+    # Usage Views (Roadmap Step 8e-3)
+    # -------------------------------------------------------------------------
+
+    def get_user_usage(
+        self,
+        user: CurrentUser,
+        now: datetime | None = None,
+    ) -> LlmUserUsageResponse:
+        """Fetch caller's current usage counters, active limits, and reset times."""
+        now_ts = now or datetime.now(UTC)
+        if now_ts.tzinfo is None:
+            now_ts = now_ts.replace(tzinfo=UTC)
+        else:
+            now_ts = now_ts.astimezone(UTC)
+
+        day_start, month_start = self.get_window_dates(now_ts)
+        user_id_str = str(user.id)
+
+        with self.session_factory() as session:
+            repo = LlmUsageRepository(session)
+            entitlement = repo.get_entitlement(user.id)
+            user_daily_limit, user_monthly_limit = self.resolve_user_limits(
+                user.id, user.email, session
+            )
+
+            tier = "free"
+            if entitlement is not None:
+                is_valid = (
+                    entitlement.valid_until is None or entitlement.valid_until > now_ts
+                )
+                if is_valid:
+                    tier = entitlement.tier
+                elif (
+                    user.email
+                    and user.email.strip().lower()
+                    in self.settings.llm_allowed_email_set
+                ):
+                    tier = "developer"
+            elif (
+                user.email
+                and user.email.strip().lower() in self.settings.llm_allowed_email_set
+            ):
+                tier = "developer"
+
+            day_counter = repo.get_counter(
+                scope="user",
+                scope_key=user_id_str,
+                window_kind="day",
+                window_start=day_start,
+            )
+            month_counter = repo.get_counter(
+                scope="user",
+                scope_key=user_id_str,
+                window_kind="month",
+                window_start=month_start,
+            )
+
+        day_resets_at = self.calculate_resets_at("day", now_ts)
+        month_resets_at = self.calculate_resets_at("month", now_ts)
+
+        day_view = LlmQuotaWindowView(
+            scope="user",
+            window_kind="day",
+            window_start=day_start,
+            calls_reserved=day_counter.calls_reserved if day_counter else 0,
+            calls_settled=day_counter.calls_settled if day_counter else 0,
+            # In the Step 8e quota model (§4.3, §5.1), calls_reserved tracks all calls admitted
+            # into the window and is never decremented on settle. calls_settled tracks completed
+            # calls. The total calls counted against quota is therefore calls_reserved.
+            calls_total=day_counter.calls_reserved if day_counter else 0,
+            call_limit=user_daily_limit,
+            cost_reserved_micros=day_counter.cost_reserved_micros if day_counter else 0,
+            cost_micros=day_counter.cost_micros if day_counter else 0,
+            cost_total_micros=(
+                (day_counter.cost_reserved_micros + day_counter.cost_micros)
+                if day_counter
+                else 0
+            ),
+            cost_limit_micros=None,
+            resets_at=day_resets_at,
+            retry_after=self.calculate_retry_after("day", now_ts),
+        )
+
+        month_view = LlmQuotaWindowView(
+            scope="user",
+            window_kind="month",
+            window_start=month_start,
+            calls_reserved=month_counter.calls_reserved if month_counter else 0,
+            calls_settled=month_counter.calls_settled if month_counter else 0,
+            calls_total=month_counter.calls_reserved if month_counter else 0,
+            call_limit=user_monthly_limit,
+            cost_reserved_micros=month_counter.cost_reserved_micros
+            if month_counter
+            else 0,
+            cost_micros=month_counter.cost_micros if month_counter else 0,
+            cost_total_micros=(
+                (month_counter.cost_reserved_micros + month_counter.cost_micros)
+                if month_counter
+                else 0
+            ),
+            cost_limit_micros=None,
+            resets_at=month_resets_at,
+            retry_after=self.calculate_retry_after("month", now_ts),
+        )
+
+        return LlmUserUsageResponse(
+            user_id=user.id,
+            tier=tier,
+            day=day_view,
+            month=month_view,
+        )
+
+    def get_admin_usage(
+        self,
+        now: datetime | None = None,
+    ) -> LlmAdminUsageResponse:
+        """Fetch global usage counters, configured ceilings, and recent activity."""
+        now_ts = now or datetime.now(UTC)
+        if now_ts.tzinfo is None:
+            now_ts = now_ts.replace(tzinfo=UTC)
+        else:
+            now_ts = now_ts.astimezone(UTC)
+
+        day_start, month_start = self.get_window_dates(now_ts)
+
+        with self.session_factory() as session:
+            repo = LlmUsageRepository(session)
+            global_day_counter = repo.get_counter(
+                scope="global",
+                scope_key="-",
+                window_kind="day",
+                window_start=day_start,
+            )
+            global_month_counter = repo.get_counter(
+                scope="global",
+                scope_key="-",
+                window_kind="month",
+                window_start=month_start,
+            )
+            recent_res_models = repo.get_recent_reservations(limit=50)
+            recent_event_models = repo.get_recent_events(limit=50)
+
+            recent_reservations = [
+                LlmReservationSummary(
+                    id=r.id,
+                    user_id=r.user_id,
+                    request_id=r.request_id,
+                    call_kind=r.call_kind,
+                    provider=r.provider,
+                    state=r.state,
+                    cost_reserved_micros=r.cost_reserved_micros,
+                    created_at=r.created_at,
+                    started_at=r.started_at,
+                    closed_at=r.closed_at,
+                )
+                for r in recent_res_models
+            ]
+            recent_events = [
+                LlmEventSummary(
+                    id=e.id,
+                    user_id=e.user_id,
+                    request_id=e.request_id,
+                    reservation_id=e.reservation_id,
+                    call_kind=e.call_kind,
+                    provider=e.provider,
+                    model_id=e.model_id,
+                    status=e.status,
+                    prompt_tokens=e.prompt_tokens,
+                    completion_tokens=e.completion_tokens,
+                    estimated_cost_micros=e.estimated_cost_micros,
+                    created_at=e.created_at,
+                )
+                for e in recent_event_models
+            ]
+
+        day_resets_at = self.calculate_resets_at("day", now_ts)
+        month_resets_at = self.calculate_resets_at("month", now_ts)
+
+        global_day_view = LlmQuotaWindowView(
+            scope="global",
+            window_kind="day",
+            window_start=day_start,
+            calls_reserved=global_day_counter.calls_reserved
+            if global_day_counter
+            else 0,
+            calls_settled=global_day_counter.calls_settled if global_day_counter else 0,
+            calls_total=(
+                global_day_counter.calls_reserved if global_day_counter else 0
+            ),
+            call_limit=self.settings.llm_global_daily_calls,
+            cost_reserved_micros=global_day_counter.cost_reserved_micros
+            if global_day_counter
+            else 0,
+            cost_micros=global_day_counter.cost_micros if global_day_counter else 0,
+            cost_total_micros=(
+                (
+                    global_day_counter.cost_reserved_micros
+                    + global_day_counter.cost_micros
+                )
+                if global_day_counter
+                else 0
+            ),
+            cost_limit_micros=None,
+            resets_at=day_resets_at,
+            retry_after=self.calculate_retry_after("day", now_ts),
+        )
+
+        global_month_view = LlmQuotaWindowView(
+            scope="global",
+            window_kind="month",
+            window_start=month_start,
+            calls_reserved=global_month_counter.calls_reserved
+            if global_month_counter
+            else 0,
+            calls_settled=global_month_counter.calls_settled
+            if global_month_counter
+            else 0,
+            calls_total=(
+                global_month_counter.calls_reserved if global_month_counter else 0
+            ),
+            call_limit=None,
+            cost_reserved_micros=global_month_counter.cost_reserved_micros
+            if global_month_counter
+            else 0,
+            cost_micros=global_month_counter.cost_micros if global_month_counter else 0,
+            cost_total_micros=(
+                (
+                    global_month_counter.cost_reserved_micros
+                    + global_month_counter.cost_micros
+                )
+                if global_month_counter
+                else 0
+            ),
+            cost_limit_micros=self.settings.llm_global_monthly_cost_ceiling_micros,
+            resets_at=month_resets_at,
+            retry_after=self.calculate_retry_after("month", now_ts),
+        )
+
+        return LlmAdminUsageResponse(
+            global_day=global_day_view,
+            global_month=global_month_view,
+            recent_reservations=recent_reservations,
+            recent_events=recent_events,
+        )

@@ -735,6 +735,39 @@
         "title": "ImageItem",
         "type": "object"
       },
+      "LlmAdminUsageResponse": {
+        "description": "Admin and debug usage inspection view.",
+        "properties": {
+          "globalDay": {
+            "$ref": "#/components/schemas/LlmQuotaWindowView"
+          },
+          "globalMonth": {
+            "$ref": "#/components/schemas/LlmQuotaWindowView"
+          },
+          "recentEvents": {
+            "items": {
+              "$ref": "#/components/schemas/LlmEventSummary"
+            },
+            "title": "Recentevents",
+            "type": "array"
+          },
+          "recentReservations": {
+            "items": {
+              "$ref": "#/components/schemas/LlmReservationSummary"
+            },
+            "title": "Recentreservations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "globalDay",
+          "globalMonth",
+          "recentReservations",
+          "recentEvents"
+        ],
+        "title": "LlmAdminUsageResponse",
+        "type": "object"
+      },
       "LlmContextCell": {
         "description": "Neighboring notebook cell (or digest) sent as generation context.",
         "properties": {
@@ -761,6 +794,317 @@
           "source"
         ],
         "title": "LlmContextCell",
+        "type": "object"
+      },
+      "LlmEventSummary": {
+        "description": "Summary of an LLM usage ledger event for admin and debug inspection.",
+        "properties": {
+          "callKind": {
+            "title": "Callkind",
+            "type": "string"
+          },
+          "completionTokens": {
+            "title": "Completiontokens",
+            "type": "integer"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "title": "Createdat",
+            "type": "string"
+          },
+          "estimatedCostMicros": {
+            "title": "Estimatedcostmicros",
+            "type": "integer"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "modelId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modelid"
+          },
+          "promptTokens": {
+            "title": "Prompttokens",
+            "type": "integer"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "requestId": {
+            "format": "uuid",
+            "title": "Requestid",
+            "type": "string"
+          },
+          "reservationId": {
+            "format": "uuid",
+            "title": "Reservationid",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "userId": {
+            "format": "uuid",
+            "title": "Userid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "userId",
+          "requestId",
+          "reservationId",
+          "callKind",
+          "provider",
+          "status",
+          "promptTokens",
+          "completionTokens",
+          "estimatedCostMicros",
+          "createdAt"
+        ],
+        "title": "LlmEventSummary",
+        "type": "object"
+      },
+      "LlmQuotaWindowView": {
+        "description": "Aggregated quota and usage view for a scope and time window.",
+        "properties": {
+          "callLimit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calllimit"
+          },
+          "callsReserved": {
+            "title": "Callsreserved",
+            "type": "integer"
+          },
+          "callsSettled": {
+            "title": "Callssettled",
+            "type": "integer"
+          },
+          "callsTotal": {
+            "title": "Callstotal",
+            "type": "integer"
+          },
+          "costLimitMicros": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Costlimitmicros"
+          },
+          "costMicros": {
+            "title": "Costmicros",
+            "type": "integer"
+          },
+          "costReservedMicros": {
+            "title": "Costreservedmicros",
+            "type": "integer"
+          },
+          "costTotalMicros": {
+            "title": "Costtotalmicros",
+            "type": "integer"
+          },
+          "resetsAt": {
+            "format": "date-time",
+            "title": "Resetsat",
+            "type": "string"
+          },
+          "retryAfter": {
+            "title": "Retryafter",
+            "type": "integer"
+          },
+          "scope": {
+            "enum": [
+              "user",
+              "global"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "windowKind": {
+            "enum": [
+              "day",
+              "month"
+            ],
+            "title": "Windowkind",
+            "type": "string"
+          },
+          "windowStart": {
+            "format": "date",
+            "title": "Windowstart",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "windowKind",
+          "windowStart",
+          "callsReserved",
+          "callsSettled",
+          "callsTotal",
+          "costReservedMicros",
+          "costMicros",
+          "costTotalMicros",
+          "resetsAt",
+          "retryAfter"
+        ],
+        "title": "LlmQuotaWindowView",
+        "type": "object"
+      },
+      "LlmReconciliationSummary": {
+        "description": "Result summary of a stale reservation reconciliation run.",
+        "properties": {
+          "cutoff": {
+            "format": "date-time",
+            "title": "Cutoff",
+            "type": "string"
+          },
+          "reconciledReserved": {
+            "title": "Reconciledreserved",
+            "type": "integer"
+          },
+          "reconciledStarted": {
+            "title": "Reconciledstarted",
+            "type": "integer"
+          },
+          "returnedCostMicros": {
+            "title": "Returnedcostmicros",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reconciledReserved",
+          "reconciledStarted",
+          "returnedCostMicros",
+          "cutoff"
+        ],
+        "title": "LlmReconciliationSummary",
+        "type": "object"
+      },
+      "LlmReservationSummary": {
+        "description": "Summary of an LLM usage reservation for admin and debug inspection.",
+        "properties": {
+          "callKind": {
+            "title": "Callkind",
+            "type": "string"
+          },
+          "closedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closedat"
+          },
+          "costReservedMicros": {
+            "title": "Costreservedmicros",
+            "type": "integer"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "title": "Createdat",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "requestId": {
+            "format": "uuid",
+            "title": "Requestid",
+            "type": "string"
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Startedat"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "userId": {
+            "format": "uuid",
+            "title": "Userid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "userId",
+          "requestId",
+          "callKind",
+          "provider",
+          "state",
+          "costReservedMicros",
+          "createdAt"
+        ],
+        "title": "LlmReservationSummary",
+        "type": "object"
+      },
+      "LlmUserUsageResponse": {
+        "description": "User-facing usage and quota view for daily and monthly windows.",
+        "properties": {
+          "day": {
+            "$ref": "#/components/schemas/LlmQuotaWindowView"
+          },
+          "month": {
+            "$ref": "#/components/schemas/LlmQuotaWindowView"
+          },
+          "tier": {
+            "title": "Tier",
+            "type": "string"
+          },
+          "userId": {
+            "format": "uuid",
+            "title": "Userid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "userId",
+          "tier",
+          "day",
+          "month"
+        ],
+        "title": "LlmUserUsageResponse",
         "type": "object"
       },
       "LogoutRequest": {
@@ -1387,7 +1731,7 @@
       "name": "MIT"
     },
     "title": "JS Notebook API",
-    "version": "0.2.0"
+    "version": "0.3.1"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1838,6 +2182,100 @@
         ]
       }
     },
+    "/api/v1/llm/admin/reconcile": {
+      "post": {
+        "description": "Run on-demand background reconciliation of orphaned reservations.",
+        "operationId": "reconcile_stale_reservations_api_v1_llm_admin_reconcile_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmReconciliationSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Account is not authorized for LLM administrative operations"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Trigger stale reservation reconciliation",
+        "tags": [
+          "LLM"
+        ]
+      }
+    },
+    "/api/v1/llm/admin/usage": {
+      "get": {
+        "description": "Return global usage counters, monthly cost ceiling, and recent activity.",
+        "operationId": "get_admin_usage_api_v1_llm_admin_usage_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmAdminUsageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Account is not authorized for LLM administrative operations"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get global LLM usage and debug telemetry",
+        "tags": [
+          "LLM"
+        ]
+      }
+    },
     "/api/v1/llm/generate": {
       "post": {
         "description": "Generate validated JavaScript/TypeScript code for an authenticated user.\n\nThe whole guard → generate → validate → repair pipeline runs inside\na worker thread and is capped by ``settings.llm_request_timeout_seconds``\n(``LLM-NF-01``). Exceeding the deadline raises\n:class:`LlmTimeoutError` → ``504 llm_timeout``. The in-flight worker\nkeeps running until Bedrock returns, but the HTTP response is no\nlonger blocked by it.",
@@ -1950,6 +2388,43 @@
           }
         ],
         "summary": "Generate code via the Cloud LLM agent",
+        "tags": [
+          "LLM"
+        ]
+      }
+    },
+    "/api/v1/llm/usage": {
+      "get": {
+        "description": "Return caller's usage counters, active limits, and reset times for day and month windows.",
+        "operationId": "get_user_usage_api_v1_llm_usage_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmUserUsageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid access token"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get current user LLM usage and quotas",
         "tags": [
           "LLM"
         ]
