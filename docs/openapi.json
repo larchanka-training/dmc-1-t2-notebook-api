@@ -3075,7 +3075,7 @@
       "name": "Notebooks"
     },
     {
-      "description": "Cloud code-generation endpoint backed by OpenRouter (with legacy Bedrock fallback), protected by Bearer auth, prompt guard checks, rate limiting, and output validation.",
+      "description": "Cloud code-generation endpoint backed by OpenRouter (with explicit legacy Bedrock opt-in), protected by Bearer auth, prompt guard checks, rate limiting, and output validation.",
       "name": "LLM"
     },
     {

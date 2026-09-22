@@ -1,4 +1,4 @@
-"""Provider selection and the developer allowlist (roadmap Step 8d-1, Issue #186).
+"""Provider selection and the developer allowlist (roadmap Step 8d-1, Issue larchanka-training/js-notebook#186).
 
 Guarantees locked here:
 
@@ -63,7 +63,17 @@ def llm_overrides():
 
 def test_default_provider_is_openrouter() -> None:
     """Default provider is now OpenRouter (Issue larchanka-training/js-notebook#186)."""
-    assert settings.normalized_llm_provider == "openrouter"
+    assert Settings.model_fields["llm_provider"].default == "openrouter"
+    clean_settings = Settings(_env_file=None)
+    assert clean_settings.normalized_llm_provider == "openrouter"
+
+
+def test_default_provider_builds_openrouter_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When configured with OpenRouter, factory returns OpenRouterClient."""
+    monkeypatch.setattr(settings, "llm_provider", "openrouter")
+    monkeypatch.setattr(settings, "llm_openrouter_api_key", "test-key")
     provider, guard_model, generator_model = build_provider()
 
     assert isinstance(provider, OpenRouterClient)

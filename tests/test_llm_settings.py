@@ -125,3 +125,49 @@ def test_settings_openrouter_in_production_with_api_key(
     settings = Settings(_env_file=None)
     assert settings.normalized_llm_provider == "openrouter"
     assert settings.llm_openrouter_api_key == "sk-or-v1-test-key"
+
+
+def test_settings_openrouter_with_llm_summary_requires_eu_bedrock_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If summary strategy is 'llm', Bedrock generator model must use EU prefix in production."""
+    for key, value in _base_env(
+        {
+            "APP_ENV": "production",
+            "RESEND_API_KEY": "re_test",
+            "EMAIL_FROM": "test@example.com",
+            "LLM_PROVIDER": "openrouter",
+            "LLM_OPENROUTER_API_KEY": "sk-or-v1-test-key",
+            "LLM_CONTEXT_SUMMARY_STRATEGY": "llm",
+            "LLM_BEDROCK_GENERATOR_MODEL_ID": "us.amazon.nova-lite-v1:0",
+        }
+    ).items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(
+        ValueError,
+        match="LLM_BEDROCK_GENERATOR_MODEL_ID must use an EU Geo inference profile",
+    ):
+        Settings(_env_file=None)
+
+
+def test_settings_openrouter_with_compact_oldest_summary_allows_non_eu_bedrock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When Bedrock is completely unused (openrouter + compact-oldest), non-EU bedrock models are ignored."""
+    for key, value in _base_env(
+        {
+            "APP_ENV": "production",
+            "RESEND_API_KEY": "re_test",
+            "EMAIL_FROM": "test@example.com",
+            "LLM_PROVIDER": "openrouter",
+            "LLM_OPENROUTER_API_KEY": "sk-or-v1-test-key",
+            "LLM_CONTEXT_SUMMARY_STRATEGY": "compact-oldest",
+            "LLM_BEDROCK_GENERATOR_MODEL_ID": "us.amazon.nova-lite-v1:0",
+            "LLM_BEDROCK_GUARD_MODEL_ID": "us.amazon.nova-micro-v1:0",
+        }
+    ).items():
+        monkeypatch.setenv(key, value)
+    settings = Settings(_env_file=None)
+    assert settings.normalized_llm_provider == "openrouter"
+    assert settings.llm_context_summary_strategy == "compact-oldest"
+

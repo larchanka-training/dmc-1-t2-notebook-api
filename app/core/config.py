@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     # POST /llm/admin/reconcile). If EMPTY, falls back to llm_allowed_emails, and if
     # that is also EMPTY, admin access is strictly DENIED (fail-closed).
     llm_admin_emails: str = ""
-    # Deprecated: AWS Bedrock settings retained as legacy fallback (Issue #186).
+    # Deprecated: AWS Bedrock settings retained as legacy opt-in (Issue larchanka-training/js-notebook#186).
     llm_bedrock_region: str = "eu-north-1"
     llm_bedrock_guard_model_id: str = "eu.amazon.nova-micro-v1:0"
     llm_bedrock_generator_model_id: str = "eu.amazon.nova-lite-v1:0"
@@ -330,17 +330,27 @@ class Settings(BaseSettings):
             raise ValueError(f"LLM_CONTEXT_SUMMARY_STRATEGY must be one of: {allowed}")
 
         if self.is_production_like:
-            if (
-                self.normalized_llm_provider == "bedrock"
-                and not self.llm_bedrock_skip_eu_check
-            ):
-                for field_name, value in [
-                    ("LLM_BEDROCK_GUARD_MODEL_ID", self.llm_bedrock_guard_model_id),
-                    (
-                        "LLM_BEDROCK_GENERATOR_MODEL_ID",
-                        self.llm_bedrock_generator_model_id,
-                    ),
-                ]:
+            if not self.llm_bedrock_skip_eu_check:
+                bedrock_fields_to_check: list[tuple[str, str]] = []
+                if self.normalized_llm_provider == "bedrock":
+                    bedrock_fields_to_check.append(
+                        ("LLM_BEDROCK_GUARD_MODEL_ID", self.llm_bedrock_guard_model_id)
+                    )
+                    bedrock_fields_to_check.append(
+                        (
+                            "LLM_BEDROCK_GENERATOR_MODEL_ID",
+                            self.llm_bedrock_generator_model_id,
+                        )
+                    )
+                elif self.llm_context_summary_strategy.strip() == "llm":
+                    bedrock_fields_to_check.append(
+                        (
+                            "LLM_BEDROCK_GENERATOR_MODEL_ID",
+                            self.llm_bedrock_generator_model_id,
+                        )
+                    )
+
+                for field_name, value in bedrock_fields_to_check:
                     if not value.startswith("eu."):
                         raise ValueError(
                             f"{field_name} must use an EU Geo inference profile "
