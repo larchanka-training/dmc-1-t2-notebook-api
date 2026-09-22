@@ -27,6 +27,7 @@ def test_get_email_service_returns_resend_for_production_like_env() -> None:
         otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
         resend_api_key="re_test_key",
         email_from="auth@notebook.example",
+        llm_openrouter_api_key="test-key",
     )
 
     assert isinstance(get_email_service(config), ResendEmailService)

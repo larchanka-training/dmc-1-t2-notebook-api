@@ -66,6 +66,7 @@ def test_production_disables_placeholder_auth() -> None:
         otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
         resend_api_key="re_test_key",
         email_from="auth@notebook.example",
+        llm_openrouter_api_key="test-openrouter-key",
     )
 
     assert settings.placeholder_auth_enabled is False
@@ -76,6 +77,7 @@ def test_production_requires_eu_bedrock_inference_profiles() -> None:
         Settings(
             _env_file=None,
             app_env="production",
+            llm_provider="bedrock",
             jwt_secret="production-secret-value-at-least-32-chars",
             otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
             llm_bedrock_guard_model_id="amazon.nova-micro-v1:0",
@@ -85,9 +87,23 @@ def test_production_requires_eu_bedrock_inference_profiles() -> None:
         Settings(
             _env_file=None,
             app_env="production",
+            llm_provider="bedrock",
             jwt_secret="production-secret-value-at-least-32-chars",
             otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
             llm_bedrock_generator_model_id="amazon.nova-lite-v1:0",
+        )
+
+
+def test_production_requires_llm_openrouter_api_key() -> None:
+    with pytest.raises(ValidationError, match="LLM_OPENROUTER_API_KEY"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            jwt_secret="production-secret-value-at-least-32-chars",
+            otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+            resend_api_key="re_test_key",
+            email_from="auth@notebook.example",
+            llm_openrouter_api_key="",
         )
 
 
@@ -116,6 +132,7 @@ def test_production_requires_resend_api_key() -> None:
             app_env="production",
             jwt_secret="production-secret-value-at-least-32-chars",
             otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
+            llm_openrouter_api_key="test-openrouter-key",
         )
 
     settings = Settings(
@@ -125,6 +142,7 @@ def test_production_requires_resend_api_key() -> None:
         otp_hash_secret="production-otp-hash-secret-at-least-32-chars",
         resend_api_key="re_test_key",
         email_from="auth@notebook.example",
+        llm_openrouter_api_key="test-openrouter-key",
     )
 
     assert settings.resend_api_key == "re_test_key"
@@ -137,6 +155,7 @@ def test_production_requires_non_default_email_from() -> None:
         "jwt_secret": "production-secret-value-at-least-32-chars",
         "otp_hash_secret": "production-otp-hash-secret-at-least-32-chars",
         "resend_api_key": "re_test_key",
+        "llm_openrouter_api_key": "test-openrouter-key",
     }
 
     # Default EMAIL_FROM is rejected: Resend will reject mail from an
