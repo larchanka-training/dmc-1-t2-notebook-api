@@ -198,7 +198,7 @@ LLM endpoint:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /api/v1/llm/generate` | Generate JavaScript/TypeScript code through the authenticated Cloud agent. The backend runs a guard model, a generator model, code extraction, esbuild syntax validation, and bounded repair retries before returning validated code (default provider: OpenRouter; legacy Bedrock fallback). |
+| `POST /api/v1/llm/generate` | Generate JavaScript/TypeScript code through the authenticated Cloud agent. The backend runs a guard model, a generator model, code extraction, esbuild syntax validation, and bounded repair retries before returning validated code (default provider: OpenRouter; explicit legacy Bedrock opt-in). |
 
 Execution endpoint (debug/fallback):
 

@@ -291,6 +291,15 @@ def test_llm_generate_returns_503_and_cleans_up_reservations_when_key_missing_in
     headers = _login(client)
 
     gen_svc = build_generation_service(session_factory=db_session_factory)
+    converse_called = False
+
+    def spy_converse(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal converse_called
+        converse_called = True
+        raise AssertionError("Outbound provider converse must not be called on preflight failure")
+
+    monkeypatch.setattr(gen_svc.provider, "converse", spy_converse)
+
     app.dependency_overrides[get_llm_generation_service] = lambda: gen_svc
     app.dependency_overrides[get_rate_limiter] = lambda: InMemoryRateLimiter(20, 60)
 
@@ -307,6 +316,7 @@ def test_llm_generate_returns_503_and_cleans_up_reservations_when_key_missing_in
     assert response.status_code == 503
     payload = response.json()
     assert payload["error"]["code"] == "llm_provider_not_configured"
+    assert not converse_called
 
     # Verify reservations were created and cleanly released (no leaked 'reserved' state)
     with db_session_factory() as session:
