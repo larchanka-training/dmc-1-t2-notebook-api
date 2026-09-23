@@ -1,13 +1,20 @@
 from dataclasses import dataclass
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 from app.main import app
-from app.modules.llm.dependencies import get_llm_generation_service, get_rate_limiter
+from app.modules.llm.dependencies import (
+    get_llm_generation_service,
+    get_rate_limiter,
+)
+from app.modules.llm.models import LlmUsageReservation
 from app.modules.llm.schemas.llm_schemas import GenerateResponse
 from app.modules.llm.services.errors import PromptRejectedError, TextGenerationError
+from app.modules.llm.services.generation_service import build_generation_service
 from app.modules.llm.services.rate_limiter import InMemoryRateLimiter
 
 
@@ -268,3 +275,54 @@ def test_llm_generate_401_without_bearer_does_not_read_body(client: TestClient) 
     )
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "invalid_token"
+
+
+# --- A11: zero-config 503 and reservation cleanup ----------------------------
+
+
+def test_llm_generate_returns_503_and_cleans_up_reservations_when_key_missing_in_dev(
+    client: TestClient,
+    db_session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero-config dev mode without API key returns 503 llm_provider_not_configured and releases reservations."""
+    monkeypatch.setattr(settings, "llm_provider", "openrouter")
+    monkeypatch.setattr(settings, "llm_openrouter_api_key", "")
+    headers = _login(client)
+
+    gen_svc = build_generation_service(session_factory=db_session_factory)
+    converse_called = False
+
+    def spy_converse(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal converse_called
+        converse_called = True
+        raise AssertionError("Outbound provider converse must not be called on preflight failure")
+
+    monkeypatch.setattr(gen_svc.provider, "converse", spy_converse)
+
+    app.dependency_overrides[get_llm_generation_service] = lambda: gen_svc
+    app.dependency_overrides[get_rate_limiter] = lambda: InMemoryRateLimiter(20, 60)
+
+    try:
+        response = client.post(
+            f"{settings.api_prefix}/llm/generate",
+            json={"prompt": "make a constant"},
+            headers=headers,
+        )
+    finally:
+        app.dependency_overrides.pop(get_llm_generation_service, None)
+        app.dependency_overrides.pop(get_rate_limiter, None)
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["error"]["code"] == "llm_provider_not_configured"
+    assert not converse_called
+
+    # Verify reservations were created and cleanly released (no leaked 'reserved' state)
+    with db_session_factory() as session:
+        reservations = session.query(LlmUsageReservation).all()
+        assert len(reservations) == 2
+        for r in reservations:
+            assert r.state == "released"
+
+

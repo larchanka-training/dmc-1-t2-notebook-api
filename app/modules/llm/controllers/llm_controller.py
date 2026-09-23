@@ -67,11 +67,11 @@ _PIPELINE_EXECUTOR = ThreadPoolExecutor(
         },
         502: {
             "model": ApiErrorResponse,
-            "description": "Bedrock provider failed",
+            "description": "Cloud LLM provider failed",
         },
         503: {
             "model": ApiErrorResponse,
-            "description": "Bedrock provider is not configured",
+            "description": "Cloud LLM provider is not configured",
         },
         504: {
             "model": ApiErrorResponse,
@@ -101,7 +101,7 @@ def generate_code(
     a worker thread and is capped by ``settings.llm_request_timeout_seconds``
     (``LLM-NF-01``). Exceeding the deadline raises
     :class:`LlmTimeoutError` → ``504 llm_timeout``. The in-flight worker
-    keeps running until Bedrock returns, but the HTTP response is no
+    keeps running until the provider returns, but the HTTP response is no
     longer blocked by it.
     """
     future = _PIPELINE_EXECUTOR.submit(service.generate, payload, current_user)

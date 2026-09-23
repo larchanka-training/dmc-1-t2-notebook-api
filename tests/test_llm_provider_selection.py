@@ -1,9 +1,9 @@
-"""Provider selection and the developer allowlist (roadmap Step 8d-1).
+"""Provider selection and the developer allowlist (roadmap Step 8d-1, Issue larchanka-training/js-notebook#186).
 
-Two guarantees are locked here:
+Guarantees locked here:
 
-1. adding the OpenRouter adapter did NOT change the default — a deployment that
-   sets nothing still gets Bedrock, so the change is inert until opted into;
+1. OpenRouter is the active default provider (Issue larchanka-training/js-notebook#186),
+   while Bedrock remains selectable as a legacy adapter;
 2. ``LLM_ALLOWED_EMAILS`` is a real, server-side authorization control, unlike
    the UI's ``llmEnabled`` switch, which is a device-local preference.
 """
@@ -61,8 +61,28 @@ def llm_overrides():
 # ─── provider selection ──────────────────────────────────────────────────────
 
 
-def test_default_provider_is_still_bedrock(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No config change means no behaviour change — the whole point of 8d-1."""
+def test_default_provider_is_openrouter() -> None:
+    """Default provider is now OpenRouter (Issue larchanka-training/js-notebook#186)."""
+    assert Settings.model_fields["llm_provider"].default == "openrouter"
+    clean_settings = Settings(_env_file=None)
+    assert clean_settings.normalized_llm_provider == "openrouter"
+
+
+def test_default_provider_builds_openrouter_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When configured with OpenRouter, factory returns OpenRouterClient."""
+    monkeypatch.setattr(settings, "llm_provider", "openrouter")
+    monkeypatch.setattr(settings, "llm_openrouter_api_key", "test-key")
+    provider, guard_model, generator_model = build_provider()
+
+    assert isinstance(provider, OpenRouterClient)
+    assert guard_model == settings.llm_openrouter_guard_model_id
+    assert generator_model == settings.llm_openrouter_generator_model_id
+
+
+def test_bedrock_can_be_selected_explicitly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy Bedrock adapter can still be selected explicitly via LLM_PROVIDER=bedrock."""
     monkeypatch.setattr(settings, "llm_provider", "bedrock")
 
     provider, guard_model, generator_model = build_provider()
@@ -109,10 +129,29 @@ def test_unknown_provider_is_rejected_at_startup() -> None:
         Settings(llm_provider="not-a-provider")
 
 
-def test_openrouter_without_a_key_is_rejected_at_startup() -> None:
-    """Fail on boot, not on the first user click that would 503."""
-    with pytest.raises(ValidationError, match="LLM_OPENROUTER_API_KEY is required"):
-        Settings(llm_provider="openrouter", llm_openrouter_api_key="")
+def test_openrouter_without_a_key_is_rejected_in_production() -> None:
+    """Fail on boot in production if API key is missing."""
+    with pytest.raises(
+        ValidationError,
+        match="LLM_OPENROUTER_API_KEY must be set in production-like environments",
+    ):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            llm_provider="openrouter",
+            llm_openrouter_api_key="",
+            jwt_secret="x" * 32,
+            otp_hash_secret="y" * 32,
+            resend_api_key="re_test",
+            email_from="test@example.com",
+        )
+
+
+def test_openrouter_without_a_key_is_allowed_in_local_dev() -> None:
+    """In local dev, zero-config startup allows running without an external key."""
+    s = Settings(_env_file=None, app_env="dev", llm_openrouter_api_key="")
+    assert s.normalized_llm_provider == "openrouter"
+    assert s.llm_openrouter_api_key == ""
 
 
 # ─── developer allowlist ─────────────────────────────────────────────────────

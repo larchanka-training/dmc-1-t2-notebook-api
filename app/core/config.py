@@ -72,10 +72,10 @@ class Settings(BaseSettings):
     resend_api_key: str = ""
     resend_request_timeout_seconds: int = 10
     email_from: str = DEV_EMAIL_FROM
-    # Which cloud adapter serves POST /llm/generate. Default stays "bedrock" so an
-    # existing deployment behaves exactly as before; OpenRouter is opt-in per
-    # deployment (roadmap Step 8d-1).
-    llm_provider: str = "bedrock"
+    # Which cloud adapter serves POST /llm/generate. Default is "openrouter"
+    # (migrated in Issue larchanka-training/js-notebook#186). Bedrock remains
+    # available as a deprecated legacy adapter.
+    llm_provider: str = "openrouter"
     # Server-only secret. Never returned, never logged, never sent to the browser.
     llm_openrouter_api_key: str = ""
     llm_openrouter_guard_model_id: str = "openrouter/free"
@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     # POST /llm/admin/reconcile). If EMPTY, falls back to llm_allowed_emails, and if
     # that is also EMPTY, admin access is strictly DENIED (fail-closed).
     llm_admin_emails: str = ""
+    # Deprecated: AWS Bedrock settings retained as legacy opt-in (Issue larchanka-training/js-notebook#186).
     llm_bedrock_region: str = "eu-north-1"
     llm_bedrock_guard_model_id: str = "eu.amazon.nova-micro-v1:0"
     llm_bedrock_generator_model_id: str = "eu.amazon.nova-lite-v1:0"
@@ -314,14 +315,7 @@ class Settings(BaseSettings):
         if self.llm_provider.strip().lower() not in ALLOWED_LLM_PROVIDERS:
             allowed = ", ".join(sorted(ALLOWED_LLM_PROVIDERS))
             raise ValueError(f"LLM_PROVIDER must be one of: {allowed}")
-        if self.llm_provider.strip().lower() == "openrouter":
-            # Fail at startup rather than on the first user request: a missing key
-            # or a blank model id would otherwise surface as a 503/502 to whoever
-            # happened to click first.
-            if not self.llm_openrouter_api_key.strip():
-                raise ValueError(
-                    "LLM_OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter"
-                )
+        if self.normalized_llm_provider == "openrouter":
             for field_name, value in [
                 ("LLM_OPENROUTER_GUARD_MODEL_ID", self.llm_openrouter_guard_model_id),
                 (
@@ -337,13 +331,26 @@ class Settings(BaseSettings):
 
         if self.is_production_like:
             if not self.llm_bedrock_skip_eu_check:
-                for field_name, value in [
-                    ("LLM_BEDROCK_GUARD_MODEL_ID", self.llm_bedrock_guard_model_id),
-                    (
-                        "LLM_BEDROCK_GENERATOR_MODEL_ID",
-                        self.llm_bedrock_generator_model_id,
-                    ),
-                ]:
+                bedrock_fields_to_check: list[tuple[str, str]] = []
+                if self.normalized_llm_provider == "bedrock":
+                    bedrock_fields_to_check.append(
+                        ("LLM_BEDROCK_GUARD_MODEL_ID", self.llm_bedrock_guard_model_id)
+                    )
+                    bedrock_fields_to_check.append(
+                        (
+                            "LLM_BEDROCK_GENERATOR_MODEL_ID",
+                            self.llm_bedrock_generator_model_id,
+                        )
+                    )
+                elif self.llm_context_summary_strategy.strip() == "llm":
+                    bedrock_fields_to_check.append(
+                        (
+                            "LLM_BEDROCK_GENERATOR_MODEL_ID",
+                            self.llm_bedrock_generator_model_id,
+                        )
+                    )
+
+                for field_name, value in bedrock_fields_to_check:
                     if not value.startswith("eu."):
                         raise ValueError(
                             f"{field_name} must use an EU Geo inference profile "
@@ -379,6 +386,11 @@ class Settings(BaseSettings):
                     "(not the default 'noreply@example.com') in "
                     "production-like environments"
                 )
+            if self.normalized_llm_provider == "openrouter":
+                if not self.llm_openrouter_api_key.strip():
+                    raise ValueError(
+                        "LLM_OPENROUTER_API_KEY must be set in production-like environments"
+                    )
         return self
 
 

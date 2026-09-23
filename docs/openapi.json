@@ -2278,7 +2278,7 @@
     },
     "/api/v1/llm/generate": {
       "post": {
-        "description": "Generate validated JavaScript/TypeScript code for an authenticated user.\n\nThe whole guard → generate → validate → repair pipeline runs inside\na worker thread and is capped by ``settings.llm_request_timeout_seconds``\n(``LLM-NF-01``). Exceeding the deadline raises\n:class:`LlmTimeoutError` → ``504 llm_timeout``. The in-flight worker\nkeeps running until Bedrock returns, but the HTTP response is no\nlonger blocked by it.",
+        "description": "Generate validated JavaScript/TypeScript code for an authenticated user.\n\nThe whole guard → generate → validate → repair pipeline runs inside\na worker thread and is capped by ``settings.llm_request_timeout_seconds``\n(``LLM-NF-01``). Exceeding the deadline raises\n:class:`LlmTimeoutError` → ``504 llm_timeout``. The in-flight worker\nkeeps running until the provider returns, but the HTTP response is no\nlonger blocked by it.",
         "operationId": "generate_code_api_v1_llm_generate_post",
         "requestBody": {
           "content": {
@@ -2359,7 +2359,7 @@
                 }
               }
             },
-            "description": "Bedrock provider failed"
+            "description": "Cloud LLM provider failed"
           },
           "503": {
             "content": {
@@ -2369,7 +2369,7 @@
                 }
               }
             },
-            "description": "Bedrock provider is not configured"
+            "description": "Cloud LLM provider is not configured"
           },
           "504": {
             "content": {
@@ -3075,7 +3075,7 @@
       "name": "Notebooks"
     },
     {
-      "description": "Cloud code-generation endpoint backed by AWS Bedrock, protected by Bearer auth, prompt guard checks, rate limiting, and output validation.",
+      "description": "Cloud code-generation endpoint backed by OpenRouter (with explicit legacy Bedrock opt-in), protected by Bearer auth, prompt guard checks, rate limiting, and output validation.",
       "name": "LLM"
     },
     {

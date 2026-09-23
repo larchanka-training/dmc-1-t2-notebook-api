@@ -55,8 +55,8 @@ tags_metadata = [
     {
         "name": "LLM",
         "description": (
-            "Cloud code-generation endpoint backed by AWS Bedrock, protected "
-            "by Bearer auth, prompt guard checks, rate limiting, and output validation."
+            "Cloud code-generation endpoint backed by OpenRouter (with explicit legacy Bedrock "
+            "opt-in), protected by Bearer auth, prompt guard checks, rate limiting, and output validation."
         ),
     },
     {
