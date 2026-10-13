@@ -133,11 +133,11 @@ Pipeline запускается при:
 
 Этапы CI:
 
-1. `lint`: установка dev-зависимостей и запуск закреплённого `ruff check`.
-2. `test`: установка dev-зависимостей и запуск `pytest`.
+1. `lint`: проверка актуальности `uv.lock` (`uv lock --check`), синхронизация зависимостей через `uv sync --locked` и запуск `uv run ruff check .`.
+2. `test`: синхронизация зависимостей через `uv sync --locked` и запуск `uv run pytest`.
 3. `build`: сборка Docker-образа из `api/Dockerfile`.
 
-`ruff` закреплён в `requirements-dev.txt`, чтобы GitHub Actions не
+`ruff` закреплён в `[dependency-groups]` в `pyproject.toml`, чтобы GitHub Actions не
 становился красным из-за выхода новой версии линтера с новыми правилами.
 Обновление `ruff` должно идти отдельным maintenance PR с исправлением
 возникших замечаний.

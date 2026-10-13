@@ -1,4 +1,5 @@
 ARG ESBUILD_VERSION=0.21.5
+ARG UV_VERSION=0.12.13
 
 # Standalone esbuild CLI for the LLM syntax validator: the app calls it via
 # subprocess, so node/npm are build-time only and stay out of the runtime image.
@@ -18,29 +19,37 @@ RUN npm install --no-save --no-audit --no-fund "esbuild@${ESBUILD_VERSION}" \
 
 FROM python:3.14-slim AS builder
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+ARG UV_VERSION
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.13 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-COPY pyproject.toml ./
-COPY app ./app
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 
-RUN pip install --prefix=/install .
+# Install dependencies into /opt/venv using lockfile
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project
+
+# Copy application code and install project non-editable
+COPY app ./app
+COPY scripts ./scripts
+RUN uv sync --locked --no-dev --no-editable
 
 
 FROM python:3.14-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
 
 RUN addgroup --system app && adduser --system --ingroup app app
 
-COPY --from=builder /install /usr/local
+COPY --from=builder /opt/venv /opt/venv
 COPY --from=esbuild /usr/local/bin/esbuild /usr/local/bin/esbuild
 COPY app ./app
 COPY scripts ./scripts
@@ -53,3 +62,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
