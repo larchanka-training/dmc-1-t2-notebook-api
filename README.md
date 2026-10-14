@@ -267,7 +267,10 @@ New public API errors use a shared envelope:
 ## Run tests
 
 ```bash
-pytest
+uv run pytest
+
+# For strict execution verified against committed uv.lock:
+uv run --locked pytest
 ```
 
 `tests/test_startup.py` is the integration suite: it boots the app via
@@ -284,11 +287,12 @@ source of truth; the helper `scripts/openapi.py` keeps it in sync:
 
 ```bash
 # Refresh the committed snapshot from the running app
-python scripts/openapi.py dump
+uv run python scripts/openapi.py dump
 
 # Detect drift and bump the version accordingly
-python scripts/openapi.py bump            # writes pyproject.toml + snapshot
-python scripts/openapi.py bump --dry-run  # report only
+uv run python scripts/openapi.py bump            # writes pyproject.toml + snapshot
+uv lock                                         # synchronize uv.lock with bumped pyproject.toml version
+uv run python scripts/openapi.py bump --dry-run  # report only
 ```
 
 Semver rules applied by `bump`:
