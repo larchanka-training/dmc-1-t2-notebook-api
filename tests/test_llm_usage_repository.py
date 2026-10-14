@@ -2,12 +2,15 @@
 
 from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
+from unittest.mock import Mock
 
+
+import pytest
+from sqlalchemy.dialects.postgresql import psycopg
 from sqlalchemy.orm import Session
 
 from app.modules.auth.models.user import User as UserModel
 from app.modules.llm.repositories import LlmUsageRepository
-
 
 def _create_test_user(db: Session) -> UserModel:
     user = UserModel(
@@ -334,6 +337,48 @@ def test_reserve_quota_inactive_limit_dimensions_null(db_session: Session) -> No
         cost_limit_micros=500_000,
     )
     assert r2 == 50
+
+
+@pytest.mark.parametrize(
+    ("call_limit", "cost_limit_micros"),
+    [
+        (None, None),
+        (None, 5_000_000_000),
+        (10, None),
+        (10, 5_000_000_000),
+    ],
+)
+def test_reserve_quota_compiles_typed_limits_for_psycopg(
+    call_limit: int | None,
+    cost_limit_micros: int | None,
+) -> None:
+    """Verify nullable limits compile to explicit PostgreSQL casts."""
+    db = Mock(spec=Session)
+    db.identity_map = {}
+    db.execute.return_value.fetchone.return_value = (1,)
+    repo = LlmUsageRepository(db)
+    window_start = date(2026, 10, 15)
+
+    repo.reserve_quota(
+        scope="user",
+        scope_key="user-settle",
+        window_kind="day",
+        window_start=window_start,
+        call_cost=1,
+        cost_reserved_micros=100,
+        call_limit=call_limit,
+        cost_limit_micros=cost_limit_micros,
+    )
+
+    db.execute.assert_called_once()
+    statement, params = db.execute.call_args.args
+    sql = str(statement.compile(dialect=psycopg.dialect()))
+
+    assert params["cost_limit_micros"] == cost_limit_micros
+    assert params["call_limit"] == call_limit
+    assert sql.count("%(call_limit)s::INTEGER IS NULL") == 2
+    assert sql.count("%(cost_limit_micros)s::BIGINT IS NULL") == 2
+
 
 
 def test_settle_quota(db_session: Session) -> None:
