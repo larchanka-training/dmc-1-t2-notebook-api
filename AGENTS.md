@@ -53,7 +53,7 @@ the minimal contract.
 
 ## Stack
 
-- **Python 3.12**, **FastAPI** on a versioned `/api/v1`
+- **Python 3.14** (runtime & CI, requires-python `>=3.12`), **FastAPI** on a versioned `/api/v1`
 - **SQLAlchemy 2.0**, **PostgreSQL 16**
 - **Liquibase** for migrations (folder `liquibase/`)
 - **JWT (HS256)** access + opaque refresh token, **email OTP** sign-in
@@ -128,8 +128,8 @@ These are the rules a generic FastAPI habit will violate:
 ## Local checks
 
 ```bash
-ruff check .
-pytest
+uv run ruff check .
+uv run pytest
 ```
 
 CI runs the same via the monorepo's `.github/workflows/api-ci.yml`.

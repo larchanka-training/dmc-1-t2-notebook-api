@@ -1,6 +1,8 @@
 ARG ESBUILD_VERSION=0.21.5
 ARG UV_VERSION=0.12.13
 
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
 # Standalone esbuild CLI for the LLM syntax validator: the app calls it via
 # subprocess, so node/npm are build-time only and stay out of the runtime image.
 FROM node:26-slim AS esbuild
@@ -19,9 +21,7 @@ RUN npm install --no-save --no-audit --no-fund "esbuild@${ESBUILD_VERSION}" \
 
 FROM python:3.14-slim AS builder
 
-ARG UV_VERSION
-
-COPY --from=ghcr.io/astral-sh/uv:0.12.13 /uv /usr/local/bin/uv
+COPY --from=uv /uv /usr/local/bin/uv
 
 WORKDIR /app
 
@@ -62,4 +62,3 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-

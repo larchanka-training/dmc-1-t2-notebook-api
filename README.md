@@ -72,34 +72,34 @@ backend domain boundary spec (TARDIS-31): PostgreSQL schemas `users` /
 ├── .env.example
 ├── Dockerfile
 ├── pyproject.toml
-└── requirements-dev.txt
+└── uv.lock
 ```
 
 ## Quick start
 
-1. Create and activate virtual environment:
+1. Create environment and install dependencies using `uv`:
 
    ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
+   uv sync
    ```
 
-2. Install dependencies:
-
-   ```bash
-   pip install -r requirements-dev.txt
-   ```
-
-3. Copy env file:
+2. Copy env file:
 
    ```bash
    cp .env.example .env
    ```
 
-4. Run the app:
+3. Run the app:
 
    ```bash
-   uvicorn app.main:app --reload
+   uv run uvicorn app.main:app --reload
+   ```
+
+4. Run tests and linter:
+
+   ```bash
+   uv run pytest
+   uv run ruff check .
    ```
 
 API docs:

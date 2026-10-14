@@ -4,7 +4,7 @@
 
 ## Стек
 
-- Python 3.12
+- Python 3.14 (requires-python >=3.12)
 - FastAPI
 - Uvicorn
 - Pytest
@@ -29,7 +29,7 @@ cp .env.example .env
 | `API_PREFIX` | Префикс API-роутов | `/api/v1` |
 | `APP_HOST` | Host для локального запуска | `0.0.0.0` |
 | `APP_PORT` | Port для локального запуска | `8000` |
-| `DATABASE_URL` | Строка подключения к PostgreSQL | `postgresql://postgres:postgres@localhost:5432/notebook_dev` |
+| `DATABASE_URL` | Строка подключения к PostgreSQL | `postgresql+psycopg2://postgres:postgres@localhost:5432/notebook_dev` |
 | `OAUTH_NAME_APPLICATION_ID` | ID OAuth-приложения | хранить в GitHub Secrets |
 | `OAUTH_NAME_SECRET_KEY` | Secret OAuth-приложения | хранить в GitHub Secrets |
 | `TOKEN_TTL_SECONDS` | Время жизни access token | `86400` |
@@ -99,26 +99,23 @@ docker compose down -v
 
 ```bash
 cd api
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
+uv sync
 cp .env.example .env
-uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload
 ```
 
 Тесты:
 
 ```bash
 cd api
-pytest
+uv run pytest
 ```
 
 Lint:
 
 ```bash
 cd api
-pip install -r requirements-dev.txt
-ruff check .
+uv run ruff check .
 ```
 
 ## GitHub Actions CI
