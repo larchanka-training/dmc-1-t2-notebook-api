@@ -3,7 +3,7 @@
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import inspect, select, text, update, BigInteger, Integer, bindparam
+from sqlalchemy import BigInteger, Integer, bindparam, inspect, select, text, update
 from sqlalchemy.orm import Session
 
 from app.modules.llm.models import (

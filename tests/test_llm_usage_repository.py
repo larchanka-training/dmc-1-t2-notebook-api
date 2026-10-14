@@ -4,7 +4,6 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 from unittest.mock import Mock
 
-
 import pytest
 from sqlalchemy.dialects.postgresql import psycopg
 from sqlalchemy.orm import Session
@@ -378,7 +377,6 @@ def test_reserve_quota_compiles_typed_limits_for_psycopg(
     assert params["call_limit"] == call_limit
     assert sql.count("%(call_limit)s::INTEGER IS NULL") == 2
     assert sql.count("%(cost_limit_micros)s::BIGINT IS NULL") == 2
-
 
 
 def test_settle_quota(db_session: Session) -> None:
