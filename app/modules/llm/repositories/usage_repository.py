@@ -3,7 +3,7 @@
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import inspect, select, text, update
+from sqlalchemy import BigInteger, Integer, bindparam, inspect, select, text, update
 from sqlalchemy.orm import Session
 
 from app.modules.llm.models import (
@@ -362,6 +362,10 @@ class LlmUsageRepository:
                AND (:cost_limit_micros IS NULL OR c.cost_micros + c.cost_reserved_micros + :cost_micros <= :cost_limit_micros)
             RETURNING calls_reserved;
             """
+        )
+        statement = statement.bindparams(
+            bindparam("call_limit", type_=Integer),
+            bindparam("cost_limit_micros", type_=BigInteger),
         )
         result = self.db.execute(
             statement,
