@@ -1,0 +1,9 @@
+.venv
+.env*
+tests/
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.git
+msd_fastapi_template.egg-info/

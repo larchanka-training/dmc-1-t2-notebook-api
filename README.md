@@ -72,34 +72,34 @@ backend domain boundary spec (TARDIS-31): PostgreSQL schemas `users` /
 ├── .env.example
 ├── Dockerfile
 ├── pyproject.toml
-└── requirements-dev.txt
+└── uv.lock
 ```
 
 ## Quick start
 
-1. Create and activate virtual environment:
+1. Create environment and install dependencies using `uv`:
 
    ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
+   uv sync
    ```
 
-2. Install dependencies:
-
-   ```bash
-   pip install -r requirements-dev.txt
-   ```
-
-3. Copy env file:
+2. Copy env file:
 
    ```bash
    cp .env.example .env
    ```
 
-4. Run the app:
+3. Run the app:
 
    ```bash
-   uvicorn app.main:app --reload
+   uv run uvicorn app.main:app --reload
+   ```
+
+4. Run tests and linter:
+
+   ```bash
+   uv run pytest
+   uv run ruff check .
    ```
 
 API docs:
@@ -267,7 +267,10 @@ New public API errors use a shared envelope:
 ## Run tests
 
 ```bash
-pytest
+uv run pytest
+
+# For strict execution verified against committed uv.lock:
+uv run --locked pytest
 ```
 
 `tests/test_startup.py` is the integration suite: it boots the app via
@@ -284,11 +287,12 @@ source of truth; the helper `scripts/openapi.py` keeps it in sync:
 
 ```bash
 # Refresh the committed snapshot from the running app
-python scripts/openapi.py dump
+uv run python scripts/openapi.py dump
 
 # Detect drift and bump the version accordingly
-python scripts/openapi.py bump            # writes pyproject.toml + snapshot
-python scripts/openapi.py bump --dry-run  # report only
+uv run python scripts/openapi.py bump            # writes pyproject.toml + snapshot
+uv lock                                         # synchronize uv.lock with bumped pyproject.toml version
+uv run python scripts/openapi.py bump --dry-run  # report only
 ```
 
 Semver rules applied by `bump`:
