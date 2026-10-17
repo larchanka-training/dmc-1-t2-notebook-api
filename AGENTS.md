@@ -136,6 +136,34 @@ CI runs the same via the monorepo's `.github/workflows/api-ci.yml`.
 
 ---
 
+## Docker toolchain updates (manual synchronization)
+
+Dependabot manages Python packages via `uv` lockfile automation, but Docker
+base images and builder tools are maintained manually to keep multi-stage
+containers and CI workflows synchronized:
+
+- **`uv` version**:
+  - `Dockerfile` (`ARG UV_VERSION=<version>`)
+  - `.github/workflows/pull-request.yml` (`version: "<version>"`)
+  - `.github/workflows/openapi-version.yml` (`version: "<version>"`)
+- **Python version**:
+  - `.python-version` (active runtime and CI target)
+  - `Dockerfile` (`FROM python:<version>-slim AS builder` and `AS runtime`)
+  - `pyproject.toml` (`requires-python` — minimal supported version, not the runtime version; change only when intentionally changing minimum supported Python versions)
+  - `.github/workflows/pull-request.yml` (`run: uv python install <version>`)
+  - `.github/workflows/openapi-version.yml` (`run: uv python install <version>`)
+- **Node & esbuild (LLM syntax validator)**:
+  - `Dockerfile` (`ARG ESBUILD_VERSION=<version>`)
+  - `Dockerfile` (`FROM node:<version>-slim AS esbuild`)
+  - Note: Node is build-time only; only standalone `/usr/local/bin/esbuild` enters the runtime image.
+
+Any toolchain update must be shipped in an atomic PR in `api` synchronizing all
+matching files, verified via `docker build -t test-api .`, `uv run pytest`, and
+full containerized regression in the monorepo (`autotests/scripts/run-containerized.sh regression`
+per monorepo `AGENTS.md §11`).
+
+---
+
 ## OpenAPI
 
 `docs/openapi.json` is the committed snapshot — the source of truth
