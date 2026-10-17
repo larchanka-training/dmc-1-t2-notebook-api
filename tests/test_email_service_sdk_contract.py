@@ -368,7 +368,7 @@ def test_rsdk_08_structured_log_omits_code_and_api_key_fields(
 def test_rsdk_08_upstream_exception_text_propagated_to_error_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RSDK-08 characterization: upstream exception string is recorded in error field verbatim (future sanitization tracked separately)."""
+    """RSDK-08 characterization: upstream exception string is recorded in error field verbatim (future sanitization tracked in api#116)."""
     synthetic_msg = "Upstream transport error: connection reset by peer"
 
     def failing_request(*args: Any, **kwargs: Any) -> MockResponse:
