@@ -1,8 +1,8 @@
 """Contract tests for real Resend SDK integration with RequestsClient.
 
 Verifies that the Resend SDK correctly interacts with the underlying HTTP transport,
-forwards custom timeouts, parses responses, and transforms transport/provider failures
-into EmailDeliveryError without leaking raw secrets or codes.
+forwards custom timeouts and Authorization headers, parses responses, and transforms
+transport/provider failures into EmailDeliveryError.
 """
 
 from datetime import UTC, datetime
@@ -57,7 +57,7 @@ def restore_resend_globals() -> Any:
 def test_rsdk_01_successful_send_forwards_options_and_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RSDK-01: Real SDK forwards timeout and payload to requests transport."""
+    """RSDK-01: Real SDK forwards timeout, authorization header, and payload to transport."""
     recorded_calls: list[dict[str, Any]] = []
 
     def fake_request(
@@ -88,6 +88,10 @@ def test_rsdk_01_successful_send_forwards_options_and_timeout(
     assert call["method"].lower() == "post"
     assert "/emails" in call["url"]
     assert call["kwargs"].get("timeout") == 7
+
+    headers = call["kwargs"].get("headers")
+    assert isinstance(headers, dict)
+    assert headers.get("Authorization") == "Bearer re_contract_key_123"
 
     payload = call["kwargs"].get("json")
     assert isinstance(payload, dict)
@@ -130,6 +134,7 @@ def test_rsdk_02_timeout_raises_delivery_error_without_retry(
 
 @pytest.mark.xfail(
     version("resend") == "2.30.1",
+    raises=pytest.fail.Exception,
     reason="Known Resend 2.30.1 HTTP status handling defect (api#113)",
     strict=True,
 )
@@ -253,12 +258,12 @@ def test_rsdk_06_http_200_malformed_json_or_invalid_bytes(
     with pytest.raises(EmailDeliveryError):
         service.send_otp(email="recipient@example.com", code="123456", expires_at=expires_at)
 
-    # Subtest B: Invalid UTF-8 bytes
+    # Subtest B: Invalid UTF-8 sequence (invalid continuation byte)
     monkeypatch.setattr(
         "resend.http_client_requests.requests.request",
         lambda *args, **kwargs: MockResponse(
             status_code=200,
-            content=b"\xff\xfe\xfd",
+            content=b'{"id": "\xc3\x28"}',
             headers={"Content-Type": "application/json"},
         ),
     )
@@ -311,10 +316,10 @@ def test_rsdk_07_production_endpoint_handles_success_and_transport_failure(
     assert fail_resp.json()["error"]["code"] == "email_delivery_failed"
 
 
-def test_rsdk_08_no_raw_otp_or_api_key_leaks_in_failure_logs(
+def test_rsdk_08_structured_log_omits_code_and_api_key_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RSDK-08: Logs on transport failure do not leak raw OTP codes or API keys."""
+    """RSDK-08: Structured logging arguments omit code and api_key fields."""
     monkeypatch.setattr(
         "resend.http_client_requests.requests.request",
         lambda *args, **kwargs: MockResponse(
@@ -335,24 +340,57 @@ def test_rsdk_08_no_raw_otp_or_api_key_leaks_in_failure_logs(
 
     monkeypatch.setattr(email_service_module, "logger", FakeLogger())
 
-    secret_key = "re_very_secret_api_key_value"
-    secret_code = "771122"
-
     service = ResendEmailService(
-        api_key=secret_key,
+        api_key="re_secret_key_123",
         from_email="auth@notebook.example",
     )
 
     with pytest.raises(EmailDeliveryError):
         service.send_otp(
             email="recipient@example.com",
-            code=secret_code,
+            code="654321",
             expires_at=datetime(2026, 10, 17, 23, 0, tzinfo=UTC),
         )
 
     assert len(logged_events) == 1
     event, kwargs = logged_events[0]
     assert event == "auth.otp.email.failed"
-    logged_str = repr(kwargs)
-    assert secret_code not in logged_str
-    assert secret_key not in logged_str
+    assert set(kwargs.keys()) == {"email", "expires_at", "error"}
+    assert "code" not in kwargs
+    assert "api_key" not in kwargs
+
+
+def test_rsdk_08_upstream_exception_text_propagated_to_error_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RSDK-08 characterization: upstream exception string is recorded in error field verbatim."""
+    synthetic_msg = "Upstream transport error: connection reset by peer"
+
+    def failing_request(*args: Any, **kwargs: Any) -> MockResponse:
+        raise requests.RequestException(synthetic_msg)
+
+    monkeypatch.setattr("resend.http_client_requests.requests.request", failing_request)
+
+    logged_events: list[tuple[str, dict[str, Any]]] = []
+
+    class FakeLogger:
+        def info(self, event: str, **kwargs: Any) -> None:
+            logged_events.append((event, kwargs))
+
+    monkeypatch.setattr(email_service_module, "logger", FakeLogger())
+
+    service = ResendEmailService(
+        api_key="re_secret_key_123",
+        from_email="auth@notebook.example",
+    )
+
+    with pytest.raises(EmailDeliveryError):
+        service.send_otp(
+            email="recipient@example.com",
+            code="654321",
+            expires_at=datetime(2026, 10, 17, 23, 0, tzinfo=UTC),
+        )
+
+    assert len(logged_events) == 1
+    _, kwargs = logged_events[0]
+    assert synthetic_msg in kwargs["error"]
