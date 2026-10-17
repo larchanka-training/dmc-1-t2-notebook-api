@@ -340,15 +340,18 @@ def test_rsdk_08_structured_log_omits_code_and_api_key_fields(
 
     monkeypatch.setattr(email_service_module, "logger", FakeLogger())
 
+    secret_key = "re_secret_key_123"
+    secret_code = "654321"
+
     service = ResendEmailService(
-        api_key="re_secret_key_123",
+        api_key=secret_key,
         from_email="auth@notebook.example",
     )
 
     with pytest.raises(EmailDeliveryError):
         service.send_otp(
             email="recipient@example.com",
-            code="654321",
+            code=secret_code,
             expires_at=datetime(2026, 10, 17, 23, 0, tzinfo=UTC),
         )
 
@@ -358,12 +361,14 @@ def test_rsdk_08_structured_log_omits_code_and_api_key_fields(
     assert set(kwargs.keys()) == {"email", "expires_at", "error"}
     assert "code" not in kwargs
     assert "api_key" not in kwargs
+    assert secret_code not in repr(kwargs)
+    assert secret_key not in repr(kwargs)
 
 
 def test_rsdk_08_upstream_exception_text_propagated_to_error_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RSDK-08 characterization: upstream exception string is recorded in error field verbatim."""
+    """RSDK-08 characterization: upstream exception string is recorded in error field verbatim (future sanitization tracked separately)."""
     synthetic_msg = "Upstream transport error: connection reset by peer"
 
     def failing_request(*args: Any, **kwargs: Any) -> MockResponse:
