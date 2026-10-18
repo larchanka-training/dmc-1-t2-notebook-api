@@ -307,9 +307,9 @@ Semver rules applied by `bump`:
 
 The workflow `.github/workflows/openapi-version.yml` wires this up:
 
-- **Pull requests** — runs `bump --dry-run`; fails the check if
-  `docs/openapi.json` is stale (contributor must run `dump` and commit
-  the diff).
+- **Pull requests** — runs `bump`; fails the check if the schema
+  drifted or version was not bumped (contributor must run
+  `python scripts/openapi.py bump` and commit `pyproject.toml` + `docs/openapi.json`).
 - **Push to `main`** — runs `bump`, commits the new
   `pyproject.toml` + `docs/openapi.json`, tags the commit `vX.Y.Z`
   and pushes it.
