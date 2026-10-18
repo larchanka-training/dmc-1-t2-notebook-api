@@ -60,6 +60,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           uv run python scripts/openapi.py bump --dry-run
+          uv run python scripts/openapi.py dump
           if ! git diff --quiet -- docs/openapi.json; then
             echo "::error::docs/openapi.json is stale. Run 'python scripts/openapi.py dump' and commit the result."
             git diff -- docs/openapi.json | head -200
