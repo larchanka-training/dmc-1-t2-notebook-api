@@ -289,10 +289,12 @@ source of truth; the helper `scripts/openapi.py` keeps it in sync:
 # Refresh the committed snapshot from the running app
 uv run python scripts/openapi.py dump
 
-# Detect drift and bump the version accordingly
-uv run python scripts/openapi.py bump            # writes pyproject.toml + snapshot
-uv lock                                         # synchronize uv.lock with bumped pyproject.toml version
-uv run python scripts/openapi.py bump --dry-run  # report only
+# Verify that docs/openapi.json matches the running app schema (what CI runs on PR)
+uv run python scripts/openapi.py check
+
+# Detect drift and report semver bump kind (or bump pyproject.toml)
+uv run python scripts/openapi.py bump --dry-run
+uv run python scripts/openapi.py bump
 ```
 
 Semver rules applied by `bump`:
@@ -307,17 +309,19 @@ Semver rules applied by `bump`:
 
 The workflow `.github/workflows/openapi-version.yml` wires this up:
 
-- **Pull requests** — runs `bump --dry-run`; fails the check if
-  `docs/openapi.json` is stale (contributor must run `dump` and commit
-  the diff).
-- **Push to `main`** — runs `bump`, commits the new
-  `pyproject.toml` + `docs/openapi.json`, tags the commit `vX.Y.Z`
-  and pushes it.
+- **Pull requests** — runs `check`; fails the check if `docs/openapi.json` is
+  missing or stale (contributor must run `uv run python scripts/openapi.py dump` and commit
+  `docs/openapi.json`).
+- **Push to `main`** — runs `bump` to assess schema changes.
+  *Known limitation / deferred behavior (tracked in [#119](https://github.com/larchanka-training/dmc-1-t2-notebook-api/issues/119)):*
+  Because pull requests require committing the refreshed snapshot, `bump` on `main`
+  detects no contract drift (`kind == none`) and skips version increments and tagging.
+  Additionally, package version in `pyproject.toml` must stay synchronized with `Settings.app_version`
+  in `app/core/config.py` (enforced by `tests/test_llm_settings.py:19`). Version bumps are
+  therefore managed manually until the release pipeline redesign in #119.
 
-The monorepo's `docker-publish.yml` listens for `v*.*.*` tags and
-publishes the Docker image with tags `{{version}}` and
-`{{major}}.{{minor}}` to GHCR, so a Swagger-visible change
-auto-propagates into a new image without manual intervention.
+Image publication is handled in the monorepo via `.github/workflows/ghcr-publish.yml`
+on push to `main` (by commit SHA) and on `v*.*.*` tags (replaces the retired `docker-publish.yml`).
 
 ## How to add a new module
 

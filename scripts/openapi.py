@@ -1,9 +1,10 @@
 """Tooling around the OpenAPI schema and its impact on the project version.
 
-Two responsibilities:
+Three responsibilities:
 
   1. `dump`   — write the current OpenAPI schema to `docs/openapi.json`.
-  2. `bump`   — compare current schema vs the committed snapshot and, if it
+  2. `check`  — verify that `docs/openapi.json` matches the app schema (for PR CI).
+  3. `bump`   — compare current schema vs the committed snapshot and, if it
                  changed, bump the version in `pyproject.toml` according to
                  simple semver rules:
                    * MAJOR — removed path or removed required field
@@ -151,11 +152,39 @@ def cmd_bump(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check(_: argparse.Namespace) -> int:
+    if not SNAPSHOT_PATH.exists():
+        print(
+            f"::error::{SNAPSHOT_PATH.relative_to(REPO_ROOT)} is missing. "
+            "Run 'python scripts/openapi.py dump' and commit the resulting snapshot.",
+            file=sys.stderr,
+        )
+        return 1
+
+    schema = _load_app_schema()
+    old = _read_snapshot()
+    if old is None or _classify_change(old, schema) != "none":
+        print(
+            f"::error::{SNAPSHOT_PATH.relative_to(REPO_ROOT)} is stale or drifted from FastAPI schema. "
+            "Run 'python scripts/openapi.py dump' and commit the updated snapshot.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"OpenAPI snapshot {SNAPSHOT_PATH.relative_to(REPO_ROOT)} is up to date.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("dump", help="Write current OpenAPI schema to docs/openapi.json")
+
+    sub.add_parser(
+        "check",
+        help="Verify that docs/openapi.json matches the running app schema without modifying files",
+    )
 
     bump = sub.add_parser(
         "bump",
@@ -168,7 +197,7 @@ def main() -> int:
     )
 
     args = parser.parse_args()
-    handlers = {"dump": cmd_dump, "bump": cmd_bump}
+    handlers = {"dump": cmd_dump, "bump": cmd_bump, "check": cmd_check}
     return handlers[args.cmd](args)
 
 

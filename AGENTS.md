@@ -104,9 +104,9 @@ These are the rules a generic FastAPI habit will violate:
   documents the full procedure.
 - **Any API contract change → `python scripts/openapi.py dump`** and
   commit `docs/openapi.json`. The PR-time
-  `openapi.py bump --dry-run` check fails on stale snapshots. The ui
-  consumes the snapshot via `pnpm api:generate`. See the monorepo's
-  `notebook-api/references/openapi-sync.md`.
+  `openapi.py check` verifies snapshot freshness and fails on missing or
+  drifted snapshots. The ui consumes the snapshot via `pnpm api:generate`. See
+  the monorepo's `notebook-api/references/openapi-sync.md`.
 - **[`docs/auth.md`](./docs/auth.md) is the auth contract** — OTP →
   JWT (15 min) + refresh rotation with reuse-detection. The current
   `/auth/login` password endpoint is a temporary stub (§1) — do not
@@ -170,8 +170,9 @@ per monorepo `AGENTS.md §11`).
 for the ui's generated types.
 
 ```bash
-python scripts/openapi.py dump            # refresh snapshot
-python scripts/openapi.py bump --dry-run  # what CI runs on a PR
+python scripts/openapi.py dump            # refresh snapshot from running app
+python scripts/openapi.py check           # verify snapshot freshness (what CI runs on PR)
+python scripts/openapi.py bump --dry-run  # report semver bump kind without writing files
 ```
 
 See [`README.md`](./README.md) → "OpenAPI-driven versioning" and the

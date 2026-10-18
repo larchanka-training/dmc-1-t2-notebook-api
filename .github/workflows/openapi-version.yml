@@ -7,8 +7,8 @@ name: OpenAPI Version
 #   * minor — new endpoints / new optional fields
 #   * major — removed endpoints / removed required fields
 #
-# On `pull_request`: dry-run, fails the check if the snapshot is stale,
-# nudging the contributor to commit the schema diff.
+# On `pull_request`: verifies that docs/openapi.json matches the running app schema
+# via 'scripts/openapi.py check'; fails if the snapshot is missing or stale.
 # On `push` to main: writes the new version + snapshot back to the branch.
 
 on:
@@ -56,15 +56,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: Bump version on OpenAPI change (PR — dry-run)
+      - name: OpenAPI snapshot freshness check (PR)
         if: github.event_name == 'pull_request'
-        run: |
-          uv run python scripts/openapi.py bump --dry-run
-          if ! git diff --quiet -- docs/openapi.json; then
-            echo "::error::docs/openapi.json is stale. Run 'python scripts/openapi.py dump' and commit the result."
-            git diff -- docs/openapi.json | head -200
-            exit 1
-          fi
+        run: uv run python scripts/openapi.py check
 
       - name: Bump version on OpenAPI change (main)
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
