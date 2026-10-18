@@ -102,11 +102,11 @@ These are the rules a generic FastAPI habit will violate:
   changeset; no schema mutations from app startup. The
   monorepo's `notebook-api/references/liquibase-migrations.md`
   documents the full procedure.
-- **Any API contract change → `python scripts/openapi.py dump`** and
-  commit `docs/openapi.json`. The PR-time
-  `openapi.py bump --dry-run` check fails on stale snapshots. The ui
-  consumes the snapshot via `pnpm api:generate`. See the monorepo's
-  `notebook-api/references/openapi-sync.md`.
+- **Any API contract change → `python scripts/openapi.py bump`** and
+  commit `pyproject.toml` + `docs/openapi.json`. The PR-time
+  `openapi.py bump` check fails if the schema drifted or version was
+  not bumped. The ui consumes the snapshot via `pnpm api:generate`. See
+  the monorepo's `notebook-api/references/openapi-sync.md`.
 - **[`docs/auth.md`](./docs/auth.md) is the auth contract** — OTP →
   JWT (15 min) + refresh rotation with reuse-detection. The current
   `/auth/login` password endpoint is a temporary stub (§1) — do not
@@ -170,8 +170,9 @@ per monorepo `AGENTS.md §11`).
 for the ui's generated types.
 
 ```bash
-python scripts/openapi.py dump            # refresh snapshot
-python scripts/openapi.py bump --dry-run  # what CI runs on a PR
+python scripts/openapi.py bump            # writes pyproject.toml + snapshot (what CI checks on a PR)
+python scripts/openapi.py bump --dry-run  # report bump kind without writing files
+python scripts/openapi.py dump            # refresh snapshot without version bump
 ```
 
 See [`README.md`](./README.md) → "OpenAPI-driven versioning" and the
