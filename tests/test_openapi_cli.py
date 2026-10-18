@@ -189,44 +189,95 @@ def test_cmd_bump_drifted_schema_writes_version_and_snapshot(
     assert "Updated pyproject.toml and docs/openapi.json" in captured.out
 
 
-def test_ci_pr_gate_drift_detection_contract(
+def test_cmd_check_matching_schema_succeeds(
     temp_repo: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Validate the CI PR gate contract:
+    _, snapshot = temp_repo
+    sample_schema = {"openapi": "3.1.0", "info": {"title": "Test App"}}
+    snapshot.write_text(json.dumps(sample_schema), encoding="utf-8")
+    monkeypatch.setattr(openapi, "_load_app_schema", lambda: sample_schema)
 
-    1. Matching schema -> bump produces zero changes (clean working directory).
-    2. Stale snapshot / schema drift -> bump mutates pyproject.toml + docs/openapi.json,
-       which would cause git diff to exit 1.
-    """
-    pyproject, snapshot = temp_repo
-    old_schema = {"openapi": "3.1.0", "paths": {"/a": {}}}
-    snapshot.write_text(
-        json.dumps(old_schema, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-    # 1. Matching schema scenario
-    monkeypatch.setattr(openapi, "_load_app_schema", lambda: old_schema)
-    pyproject_orig = pyproject.read_text(encoding="utf-8")
-    snapshot_orig = snapshot.read_text(encoding="utf-8")
-
-    exit_code = openapi.cmd_bump(argparse.Namespace(dry_run=False))
+    exit_code = openapi.cmd_check(argparse.Namespace())
     assert exit_code == 0
-    # Files are completely unchanged
-    assert pyproject.read_text(encoding="utf-8") == pyproject_orig
-    assert snapshot.read_text(encoding="utf-8") == snapshot_orig
+    captured = capsys.readouterr()
+    assert "OpenAPI snapshot docs/openapi.json is up to date." in captured.out
 
-    # 2. Schema drift scenario (new endpoint added in code)
+
+def test_cmd_check_missing_snapshot_fails(
+    temp_repo: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, snapshot = temp_repo
+    if snapshot.exists():
+        snapshot.unlink()
+    sample_schema = {"openapi": "3.1.0", "info": {"title": "Test App"}}
+    monkeypatch.setattr(openapi, "_load_app_schema", lambda: sample_schema)
+
+    exit_code = openapi.cmd_check(argparse.Namespace())
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "::error::docs/openapi.json is missing." in captured.err
+    assert "Run 'python scripts/openapi.py dump'" in captured.err
+
+
+def test_cmd_check_drifted_snapshot_fails(
+    temp_repo: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, snapshot = temp_repo
+    old_schema = {"openapi": "3.1.0", "paths": {"/a": {}}}
     new_schema = {"openapi": "3.1.0", "paths": {"/a": {}, "/b": {}}}
+    snapshot.write_text(json.dumps(old_schema), encoding="utf-8")
     monkeypatch.setattr(openapi, "_load_app_schema", lambda: new_schema)
 
-    exit_code = openapi.cmd_bump(argparse.Namespace(dry_run=False))
-    assert exit_code == 0
-    # Files are now mutated, triggering git diff in CI
-    assert pyproject.read_text(encoding="utf-8") != pyproject_orig
-    assert snapshot.read_text(encoding="utf-8") != snapshot_orig
-    assert 'version = "0.4.0"' in pyproject.read_text(encoding="utf-8")
+    exit_code = openapi.cmd_check(argparse.Namespace())
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "::error::docs/openapi.json is stale or drifted from FastAPI schema." in captured.err
+    assert "Run 'python scripts/openapi.py dump'" in captured.err
+
+
+def test_cmd_check_generator_error_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _failing_loader() -> dict[str, Any]:
+        raise RuntimeError("FastAPI schema error during check")
+
+    monkeypatch.setattr(openapi, "_load_app_schema", _failing_loader)
+
+    with pytest.raises(RuntimeError, match="FastAPI schema error during check"):
+        openapi.cmd_check(argparse.Namespace())
+
+
+def test_openapi_version_workflow_pr_step_runs_check() -> None:
+    """Protect against CI gate mutation (RW 1 Finding 4):
+
+    The PR step in .github/workflows/openapi-version.yml must run 'scripts/openapi.py check'.
+    If the step is replaced with 'exit 0' or another command, this test fails.
+    """
+    workflow_path = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "openapi-version.yml"
+    )
+    assert workflow_path.exists(), "openapi-version.yml workflow file missing"
+    content = workflow_path.read_text(encoding="utf-8")
+
+    import re
+
+    pr_step_pattern = re.compile(
+        r"name:\s*OpenAPI snapshot freshness check.*?"
+        r"if:\s*github\.event_name\s*==\s*['\"]pull_request['\"].*?"
+        r"run:\s*.*python\s+scripts/openapi\.py\s+check",
+        re.DOTALL,
+    )
+    assert pr_step_pattern.search(content) is not None, (
+        "PR step in openapi-version.yml must execute 'python scripts/openapi.py check'. "
+        "Mutation or removal of the PR check gate detected!"
+    )
 
 
 def test_schema_generator_error_propagates(monkeypatch: pytest.MonkeyPatch) -> None:

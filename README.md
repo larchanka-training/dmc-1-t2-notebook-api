@@ -289,10 +289,12 @@ source of truth; the helper `scripts/openapi.py` keeps it in sync:
 # Refresh the committed snapshot from the running app
 uv run python scripts/openapi.py dump
 
-# Detect drift and bump the version accordingly
-uv run python scripts/openapi.py bump            # writes pyproject.toml + snapshot
-uv lock                                         # synchronize uv.lock with bumped pyproject.toml version
-uv run python scripts/openapi.py bump --dry-run  # report only
+# Verify that docs/openapi.json matches the running app schema (what CI runs on PR)
+uv run python scripts/openapi.py check
+
+# Detect drift and report semver bump kind (or bump pyproject.toml)
+uv run python scripts/openapi.py bump --dry-run
+uv run python scripts/openapi.py bump
 ```
 
 Semver rules applied by `bump`:
@@ -307,9 +309,9 @@ Semver rules applied by `bump`:
 
 The workflow `.github/workflows/openapi-version.yml` wires this up:
 
-- **Pull requests** — runs `bump`; fails the check if the schema
-  drifted or version was not bumped (contributor must run
-  `python scripts/openapi.py bump` and commit `pyproject.toml` + `docs/openapi.json`).
+- **Pull requests** — runs `check`; fails the check if `docs/openapi.json` is
+  missing or stale (contributor must run `uv run python scripts/openapi.py dump` and commit
+  `docs/openapi.json`).
 - **Push to `main`** — runs `bump`, commits the new
   `pyproject.toml` + `docs/openapi.json`, tags the commit `vX.Y.Z`
   and pushes it.

@@ -7,9 +7,9 @@ name: OpenAPI Version
 #   * minor — new endpoints / new optional fields
 #   * major — removed endpoints / removed required fields
 #
-# On `pull_request`: runs bump; fails the check if the OpenAPI schema drifted
-# or version was not bumped, nudging the contributor to commit pyproject.toml + docs/openapi.json.
-# On `push` to main: writes the new version + snapshot back to the branch if changed directly on main.
+# On `pull_request`: verifies that docs/openapi.json matches the running app schema
+# via 'scripts/openapi.py check'; fails if the snapshot is missing or stale.
+# On `push` to main: writes the new version + snapshot back to the branch.
 
 on:
   push:
@@ -56,19 +56,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: OpenAPI snapshot/version check (PR)
+      - name: OpenAPI snapshot freshness check (PR)
         if: github.event_name == 'pull_request'
-        run: |
-          if [ ! -f docs/openapi.json ]; then
-            echo "::error::docs/openapi.json is missing. Run 'python scripts/openapi.py bump' and commit pyproject.toml + docs/openapi.json."
-            exit 1
-          fi
-          uv run python scripts/openapi.py bump
-          if ! git diff --quiet -- docs/openapi.json pyproject.toml; then
-            echo "::error::OpenAPI schema changed. Run 'python scripts/openapi.py bump' and commit pyproject.toml + docs/openapi.json."
-            git diff -- docs/openapi.json pyproject.toml | head -200
-            exit 1
-          fi
+        run: uv run python scripts/openapi.py check
 
       - name: Bump version on OpenAPI change (main)
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
