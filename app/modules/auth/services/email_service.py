@@ -1,5 +1,6 @@
 """Email delivery boundary for authentication flows."""
 
+import hashlib
 from datetime import datetime
 from typing import Protocol
 
@@ -16,6 +17,74 @@ class EmailDeliveryError(RuntimeError):
     """Raised when an OTP email cannot be delivered via the configured provider."""
 
 
+def hash_email(email: str) -> str:
+    """Return a 12-character SHA-256 hash of normalized email for pseudonymized log correlation."""
+    clean = email.strip().lower()
+    return hashlib.sha256(clean.encode("utf-8")).hexdigest()[:12]
+
+
+def extract_domain(email: str) -> str:
+    """Extract normalized domain from email for delivery provider diagnostics."""
+    _, _, domain = email.strip().partition("@")
+    return domain.strip().lower()
+
+
+def extract_http_status_code(exc: Exception) -> int | None:
+    """Extract and validate HTTP status code from exception attributes.
+
+    Returns integer status code strictly in range 100..599, or None.
+    Rejects non-HTTP integers (such as 6-digit OTP codes), strings with keys,
+    dicts, negative numbers, or missing attributes.
+    """
+    raw_code = getattr(exc, "status_code", getattr(exc, "code", None))
+    if isinstance(raw_code, bool):
+        return None
+    if isinstance(raw_code, int):
+        return raw_code if 100 <= raw_code <= 599 else None
+    if isinstance(raw_code, str) and raw_code.isdigit():
+        try:
+            val = int(raw_code)
+            return val if 100 <= val <= 599 else None
+        except ValueError:
+            return None
+    return None
+
+
+SAFE_PROVIDER_ERROR_TYPES: frozenset[str] = frozenset({
+    "application_error",
+    "daily_quota_exceeded",
+    "domain_not_verified",
+    "internal_error",
+    "internal_server_error",
+    "invalid_api_key",
+    "invalid_attachment",
+    "invalid_from_address",
+    "invalid_parameter",
+    "invalid_to_address",
+    "missing_api_key",
+    "missing_required_field",
+    "missing_required_fields",
+    "monthly_quota_exceeded",
+    "rate_limit_exceeded",
+    "restricted_api_key",
+    "validation_error",
+})
+
+
+def extract_provider_error(exc: Exception) -> str | None:
+    """Extract machine-readable error token from provider exception if in known safe set.
+
+    Allows only recognized Resend error enumeration tokens.
+    Returns None for any unvalidated, custom, or complex values.
+    """
+    val = getattr(exc, "error_type", None)
+    if isinstance(val, str):
+        candidate = val.strip().lower()
+        if candidate in SAFE_PROVIDER_ERROR_TYPES:
+            return candidate
+    return None
+
+
 class EmailService(Protocol):
     """Boundary for sending OTP emails."""
 
@@ -27,7 +96,10 @@ class NoopEmailService:
     """Local/dev/test email service that does not contact an external provider."""
 
     def send_otp(self, *, email: str, code: str, expires_at: datetime) -> None:
-        """Pretend to send an OTP without logging the raw code."""
+        """Pretend to send an OTP without logging the raw code.
+
+        Logs the raw email in plain text intentionally for local dev/test debugging.
+        """
         _ = code
         logger.info(
             "auth.otp.email.noop",
@@ -49,6 +121,8 @@ class ResendEmailService:
 
     def send_otp(self, *, email: str, code: str, expires_at: datetime) -> None:
         """Send an OTP code to a user email address via Resend."""
+        email_hash = hash_email(email)
+        domain = extract_domain(email)
         try:
             resend.Emails.send(
                 {
@@ -62,17 +136,25 @@ class ResendEmailService:
                 }
             )
         except Exception as exc:
+            error_type = type(exc).__name__
+            error_code = extract_http_status_code(exc)
+            provider_error = extract_provider_error(exc)
             logger.info(
                 "auth.otp.email.failed",
-                email=email,
+                email_hash=email_hash,
+                domain=domain,
                 expires_at=expires_at.isoformat(),
-                error=str(exc),
+                error_type=error_type,
+                error_code=error_code,
+                provider_error=provider_error,
+                error=f"Failed to send OTP email: {error_type}",
             )
             raise EmailDeliveryError("Failed to send OTP email") from exc
 
         logger.info(
             "auth.otp.email.sent",
-            email=email,
+            email_hash=email_hash,
+            domain=domain,
             expires_at=expires_at.isoformat(),
         )
 
