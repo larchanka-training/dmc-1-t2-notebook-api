@@ -1,6 +1,7 @@
 """Email delivery boundary for authentication flows."""
 
 import hashlib
+import re
 from datetime import datetime
 from typing import Protocol
 
@@ -11,6 +12,8 @@ from app.core.config import Settings, settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+HTTP_STATUS_CODE_PATTERN = re.compile(r"^[1-5][0-9]{2}$")
 
 
 class EmailDeliveryError(RuntimeError):
@@ -33,20 +36,24 @@ def extract_http_status_code(exc: Exception) -> int | None:
     """Extract and validate HTTP status code from exception attributes.
 
     Returns integer status code strictly in range 100..599, or None.
-    Rejects non-HTTP integers (such as 6-digit OTP codes), strings with keys,
-    dicts, negative numbers, or missing attributes.
+    Rejects non-HTTP integers, strings with leading zeros (such as 6-digit OTP codes),
+    strings with keys, dicts, negative numbers, or missing attributes.
     """
-    raw_code = getattr(exc, "status_code", getattr(exc, "code", None))
+    try:
+        raw_code = getattr(exc, "status_code", None)
+        if raw_code is None:
+            raw_code = getattr(exc, "code", None)
+    except Exception:
+        return None
+
     if isinstance(raw_code, bool):
         return None
     if isinstance(raw_code, int):
         return raw_code if 100 <= raw_code <= 599 else None
-    if isinstance(raw_code, str) and raw_code.isdigit():
-        try:
-            val = int(raw_code)
-            return val if 100 <= val <= 599 else None
-        except ValueError:
-            return None
+    if isinstance(raw_code, str):
+        cleaned = raw_code.strip()
+        if HTTP_STATUS_CODE_PATTERN.fullmatch(cleaned):
+            return int(cleaned)
     return None
 
 
@@ -77,7 +84,10 @@ def extract_provider_error(exc: Exception) -> str | None:
     Allows only recognized Resend error enumeration tokens.
     Returns None for any unvalidated, custom, or complex values.
     """
-    val = getattr(exc, "error_type", None)
+    try:
+        val = getattr(exc, "error_type", None)
+    except Exception:
+        return None
     if isinstance(val, str):
         candidate = val.strip().lower()
         if candidate in SAFE_PROVIDER_ERROR_TYPES:
@@ -136,19 +146,28 @@ class ResendEmailService:
                 }
             )
         except Exception as exc:
-            error_type = type(exc).__name__
-            error_code = extract_http_status_code(exc)
-            provider_error = extract_provider_error(exc)
-            logger.info(
-                "auth.otp.email.failed",
-                email_hash=email_hash,
-                domain=domain,
-                expires_at=expires_at.isoformat(),
-                error_type=error_type,
-                error_code=error_code,
-                provider_error=provider_error,
-                error=f"Failed to send OTP email: {error_type}",
-            )
+            try:
+                error_type = type(exc).__name__
+                error_code = extract_http_status_code(exc)
+                provider_error = extract_provider_error(exc)
+                logger.info(
+                    "auth.otp.email.failed",
+                    email_hash=email_hash,
+                    domain=domain,
+                    expires_at=expires_at.isoformat(),
+                    error_type=error_type,
+                    error_code=error_code,
+                    provider_error=provider_error,
+                    error=f"Failed to send OTP email: {error_type}",
+                )
+            except Exception as diag_err:
+                try:
+                    logger.warning(
+                        "auth.otp.email.failed.diagnostic_error",
+                        diagnostic_error_type=type(diag_err).__name__,
+                    )
+                except Exception:
+                    pass
             raise EmailDeliveryError("Failed to send OTP email") from exc
 
         logger.info(

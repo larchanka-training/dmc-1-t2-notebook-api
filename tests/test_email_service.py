@@ -221,7 +221,7 @@ def test_extract_http_status_code_validation() -> None:
         exc.status_code = bad_code
         assert extract_http_status_code(exc) is None
 
-    # Strings containing credentials, tokens, or non-digits
+    # Strings containing credentials, tokens, non-digits, or leading zeros
     for bad_str in (
         "re_secret_key",
         "Bearer token",
@@ -232,10 +232,33 @@ def test_extract_http_status_code_validation() -> None:
         "99",
         "600",
         "654321",
+        "000429",
+        "000100",
+        "000599",
+        "0429",
+        "000000",
+        "000",
+        "4٢٩",
     ):
         exc = DummyException()
         exc.code = bad_str
         assert extract_http_status_code(exc) is None
+
+    # Fallback to code when status_code is explicitly None
+    exc_fallback = DummyException()
+    exc_fallback.status_code = None
+    exc_fallback.code = 429
+    assert extract_http_status_code(exc_fallback) == 429
+
+    exc_fallback_str = DummyException()
+    exc_fallback_str.status_code = None
+    exc_fallback_str.code = "429"
+    assert extract_http_status_code(exc_fallback_str) == 429
+
+    exc_none_both = DummyException()
+    exc_none_both.status_code = None
+    exc_none_both.code = None
+    assert extract_http_status_code(exc_none_both) is None
 
     # Complex objects (dicts, lists, booleans, None)
     for bad_obj in ({"otp": "123456"}, [400], True, False, None):
@@ -245,6 +268,14 @@ def test_extract_http_status_code_validation() -> None:
 
     # Exception with no status attributes
     assert extract_http_status_code(DummyException("generic error")) is None
+
+    # Exception whose properties raise unexpected errors upon access
+    class BuggyCodeException(Exception):
+        @property
+        def status_code(self) -> int:
+            raise RuntimeError("broken status_code property")
+
+    assert extract_http_status_code(BuggyCodeException()) is None
 
 
 def test_extract_provider_error_validation() -> None:
@@ -290,3 +321,118 @@ def test_extract_provider_error_validation() -> None:
         exc = DummyException()
         exc.error_type = bad_type
         assert extract_provider_error(exc) is None
+
+    # Exception whose properties raise unexpected errors upon access
+    class BuggyProviderException(Exception):
+        @property
+        def error_type(self) -> str:
+            raise RuntimeError("broken error_type property")
+
+    assert extract_provider_error(BuggyProviderException()) is None
+
+
+def test_resend_email_service_send_otp_survives_buggy_exception_properties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Send OTP safely handles buggy upstream exceptions whose attributes raise errors."""
+    class BuggySdkException(Exception):
+        @property
+        def status_code(self) -> int:
+            raise RuntimeError("broken status_code")
+
+        @property
+        def error_type(self) -> str:
+            raise RuntimeError("broken error_type")
+
+    monkeypatch.setattr(
+        "resend.Emails.send",
+        lambda *args, **kwargs: (_ for _ in ()).throw(BuggySdkException()),
+    )
+
+    service = ResendEmailService(
+        api_key="re_test_key",
+        from_email="auth@notebook.example",
+    )
+
+    with pytest.raises(EmailDeliveryError):
+        service.send_otp(
+            email="user@example.com",
+            code="123456",
+            expires_at=datetime(2026, 10, 17, 23, 0, tzinfo=UTC),
+        )
+
+
+def test_resend_email_service_diagnostic_fallback_does_not_leak_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback logging does not use logger.exception or leak upstream exception secrets."""
+    secret_proxy_pass = "SUPER_SECRET_PROXY_PASS_98765"
+    upstream_error = ConnectionError(f"Request failed: https://proxy:{secret_proxy_pass}@proxy.host/")
+
+    monkeypatch.setattr(
+        "resend.Emails.send",
+        lambda *args, **kwargs: (_ for _ in ()).throw(upstream_error),
+    )
+
+    warning_events: list[tuple[str, dict]] = []
+
+    class FailingLogger:
+        def info(self, *args, **kwargs):
+            raise RuntimeError("Primary diagnostic logging failed")
+
+        def warning(self, event, **kwargs):
+            warning_events.append((event, kwargs))
+
+    monkeypatch.setattr(email_service_module, "logger", FailingLogger())
+
+    service = ResendEmailService(
+        api_key="re_test_key",
+        from_email="auth@notebook.example",
+    )
+
+    with pytest.raises(EmailDeliveryError):
+        service.send_otp(
+            email="user@example.com",
+            code="123456",
+            expires_at=datetime(2026, 10, 17, 23, 0, tzinfo=UTC),
+        )
+
+    assert len(warning_events) == 1
+    event, kwargs = warning_events[0]
+    assert event == "auth.otp.email.failed.diagnostic_error"
+    assert kwargs.get("diagnostic_error_type") == "RuntimeError"
+    # Ensure raw secret is never present in kwargs or event representation
+    assert secret_proxy_pass not in repr(kwargs)
+    assert secret_proxy_pass not in repr(warning_events)
+
+
+def test_resend_email_service_send_otp_survives_when_all_logging_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When both info and warning logging fail, EmailDeliveryError is still guaranteed."""
+    monkeypatch.setattr(
+        "resend.Emails.send",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("SDK failed")),
+    )
+
+    class CompletelyBrokenLogger:
+        def info(self, *args, **kwargs):
+            raise RuntimeError("Info logger broken")
+
+        def warning(self, *args, **kwargs):
+            raise RuntimeError("Warning logger broken")
+
+    monkeypatch.setattr(email_service_module, "logger", CompletelyBrokenLogger())
+
+    service = ResendEmailService(
+        api_key="re_test_key",
+        from_email="auth@notebook.example",
+    )
+
+    # Must raise EmailDeliveryError, not the logger's RuntimeError
+    with pytest.raises(EmailDeliveryError):
+        service.send_otp(
+            email="user@example.com",
+            code="123456",
+            expires_at=datetime(2026, 10, 17, 23, 0, tzinfo=UTC),
+        )

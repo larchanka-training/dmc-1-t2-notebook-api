@@ -470,6 +470,11 @@ def test_rsdk_08_malicious_or_non_http_status_in_sdk_response_sanitized_to_none(
             b'{"statusCode": {"secret": "data"}, "name": "invalid", "message": "error"}',
             "data",
         ),
+        # 6-digit OTP string with leading zeroes (e.g. "000429") reflected in statusCode
+        (
+            b'{"statusCode": "000429", "name": "otp_leak", "message": "error"}',
+            "000429",
+        ),
     ]
 
     for body_content, forbidden_substring in test_cases:
