@@ -170,12 +170,15 @@ class ResendEmailService:
                     pass
             raise EmailDeliveryError("Failed to send OTP email") from exc
 
-        logger.info(
-            "auth.otp.email.sent",
-            email_hash=email_hash,
-            domain=domain,
-            expires_at=expires_at.isoformat(),
-        )
+        try:
+            logger.info(
+                "auth.otp.email.sent",
+                email_hash=email_hash,
+                domain=domain,
+                expires_at=expires_at.isoformat(),
+            )
+        except Exception:
+            pass
 
 
 def get_email_service(config: Settings = settings) -> EmailService:

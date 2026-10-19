@@ -401,9 +401,80 @@ def test_resend_email_service_diagnostic_fallback_does_not_leak_secrets(
     event, kwargs = warning_events[0]
     assert event == "auth.otp.email.failed.diagnostic_error"
     assert kwargs.get("diagnostic_error_type") == "RuntimeError"
+    # S1: Explicitly assert that exc_info is NOT enabled, preventing structlog traceback emission
+    assert "exc_info" not in kwargs or kwargs["exc_info"] is False
     # Ensure raw secret is never present in kwargs or event representation
     assert secret_proxy_pass not in repr(kwargs)
     assert secret_proxy_pass not in repr(warning_events)
+
+
+def test_resend_email_service_diagnostic_fallback_structlog_json_renderer_emits_no_traceback_or_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real structlog JSONRenderer never emits exception tracebacks or upstream secrets during diagnostic fallback."""
+    import io
+    import json
+    import logging
+    import structlog
+    from app.core.logging import _build_shared_processors
+
+    secret_proxy_pass = "SUPER_SECRET_PROXY_PASS_RENDERER_TEST"
+    upstream_error = ConnectionError(f"Request failed: https://proxy:{secret_proxy_pass}@proxy.host/")
+
+    monkeypatch.setattr(
+        "resend.Emails.send",
+        lambda *args, **kwargs: (_ for _ in ()).throw(upstream_error),
+    )
+
+    # Configure a real structlog logger writing JSON to an in-memory stream
+    log_stream = io.StringIO()
+    handler = logging.StreamHandler(log_stream)
+    formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=_build_shared_processors(),
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            structlog.processors.JSONRenderer(),
+        ],
+    )
+    handler.setFormatter(formatter)
+    test_logger = logging.getLogger("test_structlog_fallback")
+    test_logger.handlers = [handler]
+    test_logger.setLevel(logging.INFO)
+    test_logger.propagate = False
+
+    bound_logger = structlog.wrap_logger(test_logger)
+
+    class FailingInfoLogger:
+        def info(self, *args, **kwargs):
+            raise RuntimeError("Primary diagnostic logging failed")
+
+        def warning(self, event, **kwargs):
+            bound_logger.warning(event, **kwargs)
+
+    monkeypatch.setattr(email_service_module, "logger", FailingInfoLogger())
+
+    service = ResendEmailService(
+        api_key="re_test_key",
+        from_email="auth@notebook.example",
+    )
+
+    with pytest.raises(EmailDeliveryError):
+        service.send_otp(
+            email="user@example.com",
+            code="123456",
+            expires_at=datetime(2026, 10, 17, 23, 0, tzinfo=UTC),
+        )
+
+    log_output = log_stream.getvalue().strip()
+    assert log_output, "Expected a JSON log line to be emitted"
+    log_data = json.loads(log_output)
+
+    # Verify event and safety guarantees
+    assert log_data.get("message") == "auth.otp.email.failed.diagnostic_error"
+    assert log_data.get("diagnostic_error_type") == "RuntimeError"
+    assert "exception" not in log_data
+    assert "Traceback" not in log_output
+    assert secret_proxy_pass not in log_output
 
 
 def test_resend_email_service_send_otp_survives_when_all_logging_fails(
@@ -436,3 +507,40 @@ def test_resend_email_service_send_otp_survives_when_all_logging_fails(
             code="123456",
             expires_at=datetime(2026, 10, 17, 23, 0, tzinfo=UTC),
         )
+
+
+def test_resend_email_service_send_otp_survives_logging_failure_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S2: If email delivery succeeds via SDK, unexpected logging failure does not fail the operation."""
+    # Mock successful Resend API call
+    sent_payloads: list[dict] = []
+    monkeypatch.setattr(
+        "resend.Emails.send",
+        lambda payload: sent_payloads.append(payload),
+    )
+
+    class BrokenSuccessLogger:
+        def info(self, event, **kwargs):
+            if event == "auth.otp.email.sent":
+                raise RuntimeError("Logger crashed while recording success")
+
+        def warning(self, event, **kwargs):
+            pass
+
+    monkeypatch.setattr(email_service_module, "logger", BrokenSuccessLogger())
+
+    service = ResendEmailService(
+        api_key="re_test_key",
+        from_email="auth@notebook.example",
+    )
+
+    # Must NOT raise an exception
+    service.send_otp(
+        email="user@example.com",
+        code="123456",
+        expires_at=datetime(2026, 10, 17, 23, 0, tzinfo=UTC),
+    )
+
+    assert len(sent_payloads) == 1
+    assert sent_payloads[0]["to"] == "user@example.com"
