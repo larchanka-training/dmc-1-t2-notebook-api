@@ -358,18 +358,43 @@ def test_rsdk_08_structured_log_omits_code_and_api_key_fields(
     assert len(logged_events) == 1
     event, kwargs = logged_events[0]
     assert event == "auth.otp.email.failed"
-    assert set(kwargs.keys()) == {"email", "expires_at", "error"}
+    assert set(kwargs.keys()) == {
+        "email_hash",
+        "domain",
+        "expires_at",
+        "error_type",
+        "error_code",
+        "provider_error",
+        "error",
+    }
     assert "code" not in kwargs
     assert "api_key" not in kwargs
     assert secret_code not in repr(kwargs)
     assert secret_key not in repr(kwargs)
+    assert "recipient@example.com" not in repr(kwargs)
+    assert kwargs["email_hash"] == email_service_module.hash_email("recipient@example.com")
+    assert kwargs["domain"] == "example.com"
+    assert kwargs["error_type"] == "ResendError"
+    assert kwargs["error_code"] == 500
+    assert kwargs["provider_error"] == "internal_error"
+    assert kwargs["error"] == "Failed to send OTP email: ResendError"
 
 
-def test_rsdk_08_upstream_exception_text_propagated_to_error_field(
+def test_rsdk_08_upstream_exception_safe_structured_logging(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RSDK-08 characterization: upstream exception string is recorded in error field verbatim (future sanitization tracked in api#116)."""
-    synthetic_msg = "Upstream transport error: connection reset by peer"
+    """RSDK-08: Upstream exception is captured via safe structured attributes without leaking raw exception text or reflected secrets (api#116)."""
+    secret_key = "re_secret_key_123"
+    secret_code = "654321"
+    raw_recipient = "review.person+tag@example.com"
+
+    # Synthetic upstream transport message reflecting credentials, passwords, proxies, and reflected payload
+    synthetic_msg = (
+        f"Request failed with proxy http://admin:SYNTHETIC_PROXY_PASS@proxy.invalid/ "
+        f"for {raw_recipient} with token 987654321, password=SYNTHETIC_PASSWORD_01, "
+        f'{{"password": "pass with spaces", "secret": "comma,secret,val"}}, '
+        f"payload={secret_code}, api_key={secret_key}"
+    )
 
     def failing_request(*args: Any, **kwargs: Any) -> MockResponse:
         raise requests.RequestException(synthetic_msg)
@@ -385,17 +410,108 @@ def test_rsdk_08_upstream_exception_text_propagated_to_error_field(
     monkeypatch.setattr(email_service_module, "logger", FakeLogger())
 
     service = ResendEmailService(
-        api_key="re_secret_key_123",
+        api_key=secret_key,
         from_email="auth@notebook.example",
     )
 
     with pytest.raises(EmailDeliveryError):
         service.send_otp(
-            email="recipient@example.com",
-            code="654321",
+            email=raw_recipient,
+            code=secret_code,
             expires_at=datetime(2026, 10, 17, 23, 0, tzinfo=UTC),
         )
 
     assert len(logged_events) == 1
-    _, kwargs = logged_events[0]
-    assert synthetic_msg in kwargs["error"]
+    event, kwargs = logged_events[0]
+    assert event == "auth.otp.email.failed"
+
+    # Verify structured safe diagnostic attributes
+    assert kwargs["error_type"] == "ResendError"
+    assert kwargs["error"] == "Failed to send OTP email: ResendError"
+    assert kwargs["email_hash"] == email_service_module.hash_email(raw_recipient)
+    assert kwargs["domain"] == "example.com"
+    assert kwargs["error_code"] == 500
+    assert kwargs["provider_error"] is None
+
+    # Strictly assert that none of the reflected credentials, tokens, or raw recipient reach the log
+    logged_representation = repr(kwargs)
+    assert "SYNTHETIC_PROXY_PASS" not in logged_representation
+    assert "SYNTHETIC_PASSWORD_01" not in logged_representation
+    assert "pass with spaces" not in logged_representation
+    assert "comma,secret,val" not in logged_representation
+    assert "987654321" not in logged_representation
+    assert secret_key not in logged_representation
+    assert secret_code not in logged_representation
+    assert raw_recipient not in logged_representation
+
+
+def test_rsdk_08_malicious_or_non_http_status_in_sdk_response_sanitized_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RSDK-08: HTTP 200 responses with body statusCode containing keys, OTP codes or dicts are rejected as error_code (api#116)."""
+    secret_key = "re_secret_key_123"
+    secret_code = "654321"
+    raw_recipient = "attacker@example.com"
+
+    # Test cases where body statusCode is set to sensitive or non-HTTP data
+    test_cases = [
+        # Synthetic key string in statusCode
+        (
+            b'{"statusCode": "re_synthetic_secret_key_999", "name": "LEAK secret text", "message": "error"}',
+            "re_synthetic_secret_key_999",
+        ),
+        # 6-digit OTP code reflected in statusCode
+        (
+            b'{"statusCode": 654321, "name": "bad_token", "message": "error"}',
+            "654321",
+        ),
+        # Arbitrary object/dict in statusCode
+        (
+            b'{"statusCode": {"secret": "data"}, "name": "invalid", "message": "error"}',
+            "data",
+        ),
+        # 6-digit OTP string with leading zeroes (e.g. "000429") reflected in statusCode
+        (
+            b'{"statusCode": "000429", "name": "otp_leak", "message": "error"}',
+            "000429",
+        ),
+    ]
+
+    for body_content, forbidden_substring in test_cases:
+        monkeypatch.setattr(
+            "resend.http_client_requests.requests.request",
+            lambda *args, **kwargs: MockResponse(
+                status_code=200,
+                content=body_content,
+                headers={"Content-Type": "application/json"},
+            ),
+        )
+
+        logged_events: list[tuple[str, dict[str, Any]]] = []
+
+        class FakeLogger:
+            def info(self, event: str, **kwargs: Any) -> None:
+                logged_events.append((event, kwargs))
+
+        monkeypatch.setattr(email_service_module, "logger", FakeLogger())
+
+        service = ResendEmailService(
+            api_key=secret_key,
+            from_email="auth@notebook.example",
+        )
+
+        with pytest.raises(EmailDeliveryError):
+            service.send_otp(
+                email=raw_recipient,
+                code=secret_code,
+                expires_at=datetime(2026, 10, 17, 23, 0, tzinfo=UTC),
+            )
+
+        assert len(logged_events) == 1
+        _, kwargs = logged_events[0]
+        # Validated HTTP error_code must be None
+        assert kwargs["error_code"] is None
+        # Forbidden substring must never reach kwargs
+        assert forbidden_substring not in repr(kwargs)
+        assert secret_key not in repr(kwargs)
+        assert secret_code not in repr(kwargs)
